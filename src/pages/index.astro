@@ -1,11 +1,23 @@
 ---
-import Welcome from '../components/Welcome.astro';
 import Layout from '../layouts/Layout.astro';
+import { TENANTS } from '../lib/tenants.js';
 
-// Welcome to Astro! Wondering what to do next? Check out the Astro documentation at https://docs.astro.build
-// Don't want to use any of this? Delete everything in this file, the `assets`, `components`, and `layouts` directories, and start fresh.
+const studios = Object.values(TENANTS);
 ---
-
-<Layout>
-	<Welcome />
+<Layout title="Choose a studio">
+  <section class="page-head">
+    <h1>Choose a studio</h1>
+    <p class="muted">Select a studio to view its timetable and book a session.</p>
+  </section>
+  <ul class="sessions">
+    {studios.map((s) => (
+      <li class="session" style="grid-template-columns: 1fr auto;">
+        <div class="what">
+          <strong>{s.name}</strong>
+          <span class="seats">/{s.slug}</span>
+        </div>
+        <a class="btn btn-sm" href={`/${s.slug}`}>View schedule</a>
+      </li>
+    ))}
+  </ul>
 </Layout>

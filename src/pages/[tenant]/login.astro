@@ -1,0 +1,52 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { cookieName, encodeUser, safeNext } from '../../lib/user.js';
+
+const tenant = Astro.locals.tenant;
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+let error = '';
+let name = '';
+let email = '';
+const next = safeNext(Astro.url.searchParams.get('next'), tenant.slug);
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  name = String(form.get('name') ?? '').trim();
+  email = String(form.get('email') ?? '').trim().toLowerCase();
+  const destination = safeNext(String(form.get('next') ?? `/${tenant.slug}`), tenant.slug);
+
+  if (name.length < 1 || name.length > 60) {
+    error = 'Please enter your name (up to 60 characters).';
+  } else if (!EMAIL.test(email) || email.length > 200) {
+    error = 'Please enter a valid email address.';
+  } else {
+    Astro.cookies.set(cookieName(tenant.slug), encodeUser({ id: email, name }), {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: import.meta.env.PROD,
+      maxAge: 60 * 60 * 24 * 7,
+    });
+    return Astro.redirect(destination);
+  }
+}
+---
+<Layout title="Sign in">
+  <div class="card">
+    <h1>Sign in to {tenant.name}</h1>
+    <p class="muted">Demo sign-in: no password. Your email identifies your bookings.</p>
+    {error && <p class="alert" role="alert">{error}</p>}
+    <form method="post" action={`/${tenant.slug}/login`}>
+      <input type="hidden" name="next" value={next} />
+      <div class="field">
+        <label for="name">Name</label>
+        <input class="input" id="name" name="name" required maxlength="60" autocomplete="name" value={name} />
+      </div>
+      <div class="field">
+        <label for="email">Email</label>
+        <input class="input" id="email" name="email" type="email" required maxlength="200" autocomplete="email" value={email} />
+      </div>
+      <button class="btn" type="submit" style="width:100%">Sign in</button>
+    </form>
+  </div>
+</Layout>

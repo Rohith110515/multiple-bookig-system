@@ -9,9 +9,11 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "seed": "node --env-file=.env scripts/seed.mjs"
   },
   "dependencies": {
+    "@astrojs/node": "^11.1.13",
     "astro": "^7.4.12"
   }
 }

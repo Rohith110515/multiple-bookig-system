@@ -1,0 +1,103 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { tarunam, friendlyError, formatTime, formatDay } from '../../lib/tarunam.js';
+
+const user = Astro.locals.user;
+const tenant = Astro.locals.tenant;
+if (!user) return Astro.redirect(`/${tenant.slug}/login?next=/${tenant.slug}/bookings`);
+
+let bookings = [];
+let error = '';
+try {
+  const res = await tarunam('GET', '/bookings', {
+    tenant,
+    userId: user.id,
+    query: { user_id: user.id, order: 'asc', limit: 200 },
+  });
+  if (res.status === 200) bookings = res.data;
+  else error = friendlyError(res).message;
+} catch (err) {
+  console.error('[ui] could not reach the booking service:', err.message);
+  error = 'The booking service is unavailable right now. Please try again in a moment.';
+}
+
+const now = Date.now();
+const upcoming = bookings.filter((b) => b.status === 'confirmed' && Date.parse(b.start_time) > now);
+const earlier = bookings.filter((b) => !upcoming.includes(b)).reverse();
+const LABELS = { confirmed: 'Confirmed', cancelled: 'Cancelled', completed: 'Attended', no_show: 'No-show' };
+---
+<Layout title="My bookings">
+  <section class="page-head" data-tenant={tenant.slug}>
+    <h1>My bookings</h1>
+    <p class="muted">Signed in as {user.id} at {tenant.name}</p>
+  </section>
+  {error && <p class="alert" role="alert">{error}</p>}
+  {!error && bookings.length === 0 && (
+    <p class="empty">You have no bookings yet. <a class="link" href={`/${tenant.slug}`}>Browse sessions</a></p>
+  )}
+  {upcoming.length > 0 && (
+    <section class="day">
+      <h2>Upcoming</h2>
+      <ul class="bookings">
+        {upcoming.map((b) => (
+          <li class="booking">
+            <div class="when">{formatDay(b.start_time)}<br />{formatTime(b.start_time)} – {formatTime(b.end_time)}</div>
+            <div class="what">
+              <strong>{b.resource_name}</strong>
+              <span class="seats">{b.guests} {b.guests === 1 ? 'guest' : 'guests'}</span>
+            </div>
+            <div class="actions">
+              <span class="badge badge-confirmed">Confirmed</span>
+              <button class="btn btn-sm btn-ghost" type="button" data-cancel={b.id}>Cancel</button>
+            </div>
+            <p class="msg err" data-msg hidden></p>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )}
+  {earlier.length > 0 && (
+    <section class="day">
+      <h2>Earlier and cancelled</h2>
+      <ul class="bookings">
+        {earlier.map((b) => (
+          <li class="booking">
+            <div class="when">{formatDay(b.start_time)}<br />{formatTime(b.start_time)} – {formatTime(b.end_time)}</div>
+            <div class="what">
+              <strong>{b.resource_name}</strong>
+              <span class="seats">{b.guests} {b.guests === 1 ? 'guest' : 'guests'}</span>
+            </div>
+            <div class="actions">
+              <span class={`badge badge-${b.status}`}>{LABELS[b.status] ?? b.status}</span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )}
+</Layout>
+<script is:inline>
+  const tenantSlug = document.querySelector('[data-tenant]')?.dataset.tenant;
+  document.addEventListener('click', async (e) => {
+    const button = e.target.closest('[data-cancel]');
+    if (!button || !tenantSlug) return;
+    if (!window.confirm('Cancel this booking?')) return;
+    const row = button.closest('.booking');
+    const msg = row.querySelector('[data-msg]');
+    button.disabled = true;
+    msg.hidden = true;
+    try {
+      const res = await fetch(`/api/${tenantSlug}/bookings/${button.dataset.cancel}/cancel`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        location.reload();
+        return;
+      }
+      msg.textContent = data.message || 'Could not cancel this booking.';
+    } catch {
+      msg.textContent = 'Network problem. Please try again.';
+    }
+    msg.hidden = false;
+    button.disabled = false;
+  });
+</script>

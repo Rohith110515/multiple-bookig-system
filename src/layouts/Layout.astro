@@ -1,23 +1,53 @@
+---
+import '../styles/global.css';
+
+const { title = 'Sessions' } = Astro.props;
+const user = Astro.locals.user;
+const tenant = Astro.locals.tenant;
+const path = Astro.url.pathname;
+const base = tenant ? `/${tenant.slug}` : '';
+---
 <!doctype html>
 <html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Astro Basics</title>
-	</head>
-	<body>
-		<slot />
-	</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title} | {tenant ? tenant.name : 'Tarunam Studios'}</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="wrap nav">
+        <a href={base || '/'} class="logo">
+          {tenant ? tenant.name : <>Tarunam<span>Studios</span></>}
+        </a>
+        {tenant && (
+          <>
+            <nav>
+              <a href={base} class:list={[{ active: path === base || path === `${base}/` }]}>Sessions</a>
+              <a href={`${base}/bookings`} class:list={[{ active: path === `${base}/bookings` }]}>My bookings</a>
+              <a href="/">All studios</a>
+            </nav>
+            <div class="who">
+              {user ? (
+                <>
+                  <span class="muted">Hi, {user.name}</span>
+                  <form method="post" action={`${base}/logout`}>
+                    <button class="link" type="submit">Sign out</button>
+                  </form>
+                </>
+              ) : (
+                <a class="btn btn-sm" href={`${base}/login`}>Sign in</a>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </header>
+    <main class="wrap">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div class="wrap muted">Demo front end for the Tarunam booking API. Demo sign-in only, no payments.</div>
+    </footer>
+  </body>
 </html>
-
-<style>
-	html,
-	body {
-		margin: 0;
-		width: 100%;
-		height: 100%;
-	}
-</style>

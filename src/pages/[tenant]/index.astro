@@ -1,0 +1,200 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { tarunam, friendlyError, formatTime, formatDay, dayKey } from '../../lib/tarunam.js';
+
+const user = Astro.locals.user;
+const tenant = Astro.locals.tenant;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const params = Astro.url.searchParams;
+const days = [3, 7, 14].includes(Number(params.get('days'))) ? Number(params.get('days')) : 7;
+const resourceParam = params.get('resource') ?? '';
+const resourceId = UUID.test(resourceParam) ? resourceParam : '';
+let sessions = [];
+let resources = [];
+let settings = null;
+let error = '';
+
+try {
+  const from = new Date();
+  const to = new Date(from.getTime() + days * 24 * 3600 * 1000);
+  const [s, r, st] = await Promise.all([
+    tarunam('GET', '/schedules', {
+      tenant,
+      query: { from: from.toISOString(), to: to.toISOString(), resource_id: resourceId || null, limit: 500 },
+    }),
+    tarunam('GET', '/resources', { tenant }),
+    tarunam('GET', '/settings', { tenant }),
+  ]);
+  if (s.status !== 200) error = friendlyError(s).message;
+  else sessions = s.data;
+  if (r.status === 200) resources = r.data;
+  if (st.status === 200) settings = st.data;
+} catch (err) {
+  console.error('[ui] could not reach the booking service:', err.message);
+  error = 'The booking service is unavailable right now. Please try again in a moment.';
+}
+
+const groups = [];
+for (const s of sessions) {
+  const key = dayKey(s.start_time);
+  let group = groups[groups.length - 1];
+  if (!group || group.key !== key) {
+    group = { key, label: formatDay(s.start_time), items: [] };
+    groups.push(group);
+  }
+  group.items.push(s);
+}
+
+function href(changes) {
+  const query = new URLSearchParams({ days: String(days), ...(resourceId ? { resource: resourceId } : {}), ...changes });
+  if (query.get('resource') === '') query.delete('resource');
+  return `/${tenant.slug}?${query}`;
+}
+
+const loginHref = `/${tenant.slug}/login?next=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`;
+const rules = [];
+if (settings?.min_lead_minutes != null) rules.push(`Booking closes ${settings.min_lead_minutes} minutes before the start.`);
+if (settings?.min_cancel_notice_minutes) rules.push(`Cancel up to ${settings.min_cancel_notice_minutes} minutes before the start.`);
+---
+<Layout title="Sessions">
+  <section class="page-head">
+    <h1>Book a session</h1>
+    <p class="muted">Pick a class at {tenant.name} and reserve your spot.</p>
+    {rules.length > 0 && <p class="note">{rules.join(' ')}</p>}
+  </section>
+  <div class="filters">
+    <div class="chips" aria-label="Time window">
+      {[3, 7, 14].map((d) => (
+        <a class:list={['chip', { active: d === days }]} href={href({ days: String(d) })}>Next {d} days</a>
+      ))}
+    </div>
+    <div class="chips" aria-label="Class">
+      <a class:list={['chip', { active: !resourceId }]} href={href({ resource: '' })}>All classes</a>
+      {resources.map((r) => (
+        <a class:list={['chip', { active: r.id === resourceId }]} href={href({ resource: r.id })}>{r.name}</a>
+      ))}
+    </div>
+  </div>
+  {error && <p class="alert" role="alert">{error}</p>}
+  {!error && groups.length === 0 && <p class="empty">No sessions in this period.</p>}
+  {groups.map((g) => (
+    <section class="day">
+      <h2>{g.label}</h2>
+      <ul class="sessions">
+        {g.items.map((s) => (
+          <li class="session" data-capacity={s.capacity}>
+            <div class="when">{formatTime(s.start_time)} – {formatTime(s.end_time)}</div>
+            <div class="what">
+              <strong>{s.resource_name}</strong>
+              <span class="seats" data-seats-label>
+                {s.seats_left === 0 ? 'Fully booked' : `${s.seats_left} of ${s.capacity} seats left`}
+              </span>
+            </div>
+            {user ? (
+              <button
+                class="btn btn-sm"
+                type="button"
+                data-book
+                data-id={s.id}
+                data-name={s.resource_name}
+                data-when={`${g.label}, ${formatTime(s.start_time)}`}
+                data-seats={s.seats_left}
+                disabled={s.seats_left === 0}
+              >
+                {s.seats_left === 0 ? 'Full' : 'Book'}
+              </button>
+            ) : (
+              <a class="btn btn-sm btn-ghost" href={loginHref}>Sign in to book</a>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  ))}
+  {user && (
+    <dialog id="book-dialog" data-tenant={tenant.slug} aria-labelledby="bd-title">
+      <div class="dialog-body">
+        <h2 id="bd-title">Confirm booking</h2>
+        <p style="margin:0"><strong id="bd-name"></strong><br /><span id="bd-when" class="muted"></span></p>
+        <label for="bd-guests">Guests</label>
+        <select id="bd-guests" class="input"></select>
+        <p id="bd-msg" class="msg" role="status" aria-live="polite"></p>
+        <p id="bd-done" hidden><a class="link" href={`/${tenant.slug}/bookings`}>View my bookings →</a></p>
+        <div class="dialog-actions">
+          <button type="button" class="btn btn-ghost" id="bd-close">Close</button>
+          <button type="button" class="btn" id="bd-confirm">Confirm booking</button>
+        </div>
+      </div>
+    </dialog>
+  )}
+</Layout>
+<script is:inline>
+  const dialog = document.getElementById('book-dialog');
+  if (dialog) {
+    const tenantSlug = dialog.dataset.tenant;
+    const $ = (id) => document.getElementById(id);
+    const msg = $('bd-msg');
+    const guests = $('bd-guests');
+    const confirmBtn = $('bd-confirm');
+    const done = $('bd-done');
+    let current = null;
+    function setMsg(text, kind) {
+      msg.textContent = text;
+      msg.className = 'msg ' + (kind || '');
+    }
+    function updateCard(card, left) {
+      const label = card.querySelector('[data-seats-label]');
+      const button = card.querySelector('[data-book]');
+      label.textContent = left === 0 ? 'Fully booked' : left + ' of ' + card.dataset.capacity + ' seats left';
+      button.dataset.seats = String(left);
+      button.disabled = left === 0;
+      button.textContent = left === 0 ? 'Full' : 'Book';
+    }
+    document.addEventListener('click', (e) => {
+      const button = e.target.closest('[data-book]');
+      if (!button || button.disabled) return;
+      current = { id: button.dataset.id, card: button.closest('.session'), nonce: crypto.randomUUID() };
+      $('bd-name').textContent = button.dataset.name;
+      $('bd-when').textContent = button.dataset.when;
+      guests.innerHTML = '';
+      const max = Math.min(Number(button.dataset.seats), 6);
+      for (let n = 1; n <= max; n++) {
+        const option = document.createElement('option');
+        option.value = String(n);
+        option.textContent = n === 1 ? '1 guest' : n + ' guests';
+        guests.append(option);
+      }
+      setMsg('');
+      done.hidden = true;
+      confirmBtn.hidden = false;
+      confirmBtn.disabled = false;
+      dialog.showModal();
+    });
+    $('bd-close').addEventListener('click', () => dialog.close());
+    confirmBtn.addEventListener('click', async () => {
+      if (!current) return;
+      confirmBtn.disabled = true;
+      setMsg('Booking…');
+      try {
+        const res = await fetch(`/api/${tenantSlug}/book`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ schedule_id: current.id, guests: Number(guests.value), nonce: current.nonce }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          setMsg('You are booked!', 'ok');
+          done.hidden = false;
+          confirmBtn.hidden = true;
+          if (typeof data.seats_left === 'number') updateCard(current.card, data.seats_left);
+        } else {
+          setMsg(data.message || 'Something went wrong.', 'err');
+          confirmBtn.disabled = false;
+        }
+      } catch {
+        setMsg('Network problem. Press Confirm again. It is safe to retry and will not book twice.', 'err');
+        confirmBtn.disabled = false;
+      }
+    });
+  }
+</script>
