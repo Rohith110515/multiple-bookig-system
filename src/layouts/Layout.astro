@@ -4,7 +4,7 @@ import '../styles/global.css';
 const { title = 'Sessions' } = Astro.props;
 const user = Astro.locals.user;
 const tenant = Astro.locals.tenant;
-const path = Astro.url.pathname;
+const path = Astro.url.pathname.replace(/\/+$/, '') || '/';
 const base = tenant ? `/${tenant.slug}` : '';
 ---
 <!doctype html>
@@ -20,32 +20,36 @@ const base = tenant ? `/${tenant.slug}` : '';
         <a href={base || '/'} class="logo">
           {tenant ? tenant.name : <>Tarunam<span>Studios</span></>}
         </a>
-        {tenant && (
-          <>
-            <nav>
-              <a href={base} class:list={[{ active: path === base || path === `${base}/` }]}>Sessions</a>
+
+        <nav>
+          {tenant && (
+            <>
+              <a href={base} class:list={[{ active: path === base }]}>Sessions</a>
               <a href={`${base}/bookings`} class:list={[{ active: path === `${base}/bookings` }]}>My bookings</a>
               <a href="/">All studios</a>
-            </nav>
-            <div class="who">
-              {user ? (
-                <>
-                  <span class="muted">Hi, {user.name}</span>
-                  <form method="post" action={`${base}/logout`}>
-                    <button class="link" type="submit">Sign out</button>
-                  </form>
-                </>
-              ) : (
-                <a class="btn btn-sm" href={`${base}/login`}>Sign in</a>
-              )}
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </nav>
+
+        <div class="who">
+          {user ? (
+            <>
+              <span class="muted">Hi, {user.name}</span>
+              <form method="post" action="/logout">
+                <button class="link" type="submit">Sign out</button>
+              </form>
+            </>
+          ) : (
+            <a class="btn btn-sm" href="/login">Sign in</a>
+          )}
+        </div>
       </div>
     </header>
+
     <main class="wrap">
       <slot />
     </main>
+
     <footer class="site-footer">
       <div class="wrap muted">Demo front end for the Tarunam booking API. Demo sign-in only, no payments.</div>
     </footer>

@@ -2,12 +2,13 @@
 import Layout from '../layouts/Layout.astro';
 import { TENANTS } from '../lib/tenants.js';
 
+const user = Astro.locals.user;
 const studios = Object.values(TENANTS);
 ---
 <Layout title="Choose a studio">
   <section class="page-head">
     <h1>Choose a studio</h1>
-    <p class="muted">Select a studio to view its timetable and book a session.</p>
+    <p class="muted">Welcome, {user?.name}. Select a studio to view its timetable and book a session.</p>
   </section>
   <ul class="sessions">
     {studios.map((s) => (

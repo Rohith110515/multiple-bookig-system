@@ -1,0 +1,125 @@
+---
+import { SESSION_COOKIE, encodeSession, safeNext } from '../lib/session.js';
+
+const next = safeNext(Astro.url.searchParams.get('next'));
+if (Astro.locals.user) return Astro.redirect(next); // already signed in
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+let error = '';
+let name = '';
+let email = '';
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  name = String(form.get('name') ?? '').trim();
+  email = String(form.get('email') ?? '').trim().toLowerCase();
+  const destination = safeNext(String(form.get('next') ?? ''));
+
+  if (name.length < 1 || name.length > 60) {
+    error = 'Please enter your name (up to 60 characters).';
+  } else if (!EMAIL.test(email) || email.length > 200) {
+    error = 'Please enter a valid email address.';
+  } else {
+    // The email becomes the user id stored on each booking
+    Astro.cookies.set(SESSION_COOKIE, encodeSession({ id: email, name }), {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: import.meta.env.PROD,
+      maxAge: 60 * 60 * 24 * 7,
+    });
+    return Astro.redirect(destination);
+  }
+}
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in | Tarunam Studios</title>
+  </head>
+  <body>
+    <div class="auth">
+      <aside class="side">
+        <div class="brand"><span class="mark">T</span><span>Tarunam Studios</span></div>
+        <div class="pitch">
+          <h2>Book classes at your favourite studios.</h2>
+          <ul>
+            <li>Browse live availability by date</li>
+            <li>Reserve your seats in seconds</li>
+            <li>Manage or cancel any time</li>
+          </ul>
+        </div>
+        <p class="foot">Demo environment, powered by the Tarunam booking API.</p>
+      </aside>
+
+      <main class="main">
+        <div class="card">
+          <h1>Welcome</h1>
+          <p class="muted">Sign in to browse studios and book sessions.</p>
+
+          <p class="demo" role="note">
+            <strong>Demo mode.</strong> Any name and email will work. Nothing is verified and there is no password.
+          </p>
+
+          {error && <p class="alert" role="alert">{error}</p>}
+
+          <form method="post" action="/login">
+            <input type="hidden" name="next" value={next} />
+            <div class="field">
+              <label for="name">Full name</label>
+              <input id="name" name="name" required maxlength="60" autocomplete="name" value={name} placeholder="Rohit Kumar" />
+            </div>
+            <div class="field">
+              <label for="email">Email</label>
+              <input id="email" name="email" type="email" required maxlength="200" autocomplete="email" value={email} placeholder="you@example.com" />
+            </div>
+            <button class="btn" type="submit">Continue</button>
+            <button class="btn ghost" type="button" id="demo-fill">Use a demo account</button>
+          </form>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>
+
+<script>
+  document.getElementById('demo-fill')?.addEventListener('click', () => {
+    document.getElementById('name').value = 'Demo User';
+    document.getElementById('email').value = 'demo@example.com';
+  });
+</script>
+
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #0f172a; -webkit-font-smoothing: antialiased; }
+  .auth { min-height: 100vh; display: grid; grid-template-columns: 1.1fr 1fr; }
+  .side { background: linear-gradient(160deg, #1e1b4b 0%, #4338ca 55%, #6366f1 100%); color: #fff; padding: 3rem; display: flex; flex-direction: column; justify-content: space-between; gap: 2rem; }
+  .brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 800; font-size: 1.1rem; }
+  .mark { width: 34px; height: 34px; border-radius: 10px; background: rgba(255, 255, 255, 0.18); display: grid; place-items: center; font-weight: 800; }
+  .pitch h2 { font-size: clamp(1.6rem, 3vw, 2.3rem); letter-spacing: -0.02em; line-height: 1.15; max-width: 18ch; margin: 0; }
+  .pitch ul { list-style: none; padding: 0; margin: 1.5rem 0 0; display: grid; gap: 0.7rem; }
+  .pitch li { display: flex; gap: 0.6rem; align-items: center; color: rgba(255, 255, 255, 0.92); }
+  .pitch li::before { content: "✓"; width: 22px; height: 22px; border-radius: 50%; background: rgba(255, 255, 255, 0.2); display: grid; place-items: center; font-size: 0.75rem; flex: none; }
+  .foot { font-size: 0.82rem; color: rgba(255, 255, 255, 0.7); margin: 0; }
+  .main { display: grid; place-items: center; padding: 2rem; background: #fff; }
+  .card { width: min(400px, 100%); }
+  h1 { margin: 0 0 0.35rem; font-size: 2rem; letter-spacing: -0.02em; }
+  .muted { color: #64748b; margin: 0; }
+  .demo { background: #fef3c7; color: #b45309; border-radius: 10px; padding: 0.65rem 0.9rem; font-size: 0.88rem; margin: 1.1rem 0; }
+  .alert { background: #fee2e2; color: #991b1b; border-radius: 10px; padding: 0.7rem 0.9rem; margin: 0 0 1rem; font-size: 0.92rem; }
+  .field { display: grid; gap: 0.35rem; margin-bottom: 1rem; }
+  label { font-weight: 600; font-size: 0.9rem; }
+  input { width: 100%; padding: 0.75rem 0.9rem; border: 1px solid #cbd5e1; border-radius: 10px; font: inherit; }
+  input:focus-visible { outline: 3px solid rgba(79, 70, 229, 0.4); outline-offset: 1px; border-color: #4f46e5; }
+  .btn { width: 100%; padding: 0.75rem 1.2rem; border: 0; border-radius: 10px; background: #4f46e5; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  .btn:hover { background: #4338ca; }
+  .btn.ghost { background: #fff; color: #0f172a; border: 1px solid #cbd5e1; margin-top: 0.6rem; }
+  .btn.ghost:hover { background: #eef2ff; }
+  @media (max-width: 820px) {
+    .auth { grid-template-columns: 1fr; }
+    .side { padding: 1.5rem; }
+    .pitch, .foot { display: none; }
+  }
+</style>

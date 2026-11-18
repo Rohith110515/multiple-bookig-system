@@ -4,7 +4,7 @@ import { tarunam, friendlyError, formatTime, formatDay } from '../../lib/tarunam
 
 const user = Astro.locals.user;
 const tenant = Astro.locals.tenant;
-if (!user) return Astro.redirect(`/${tenant.slug}/login?next=/${tenant.slug}/bookings`);
+if (!user) return Astro.redirect(`/login?next=${encodeURIComponent(`/${tenant.slug}/bookings`)}`);
 
 let bookings = [];
 let error = '';
