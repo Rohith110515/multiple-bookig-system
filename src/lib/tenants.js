@@ -1,6 +1,6 @@
 const env = (key) => import.meta.env?.[key] ?? process.env[key];
 
-// Each studio: its slug (the URL segment and Tarunam tenant id), display name,
+// Each studio: slug (URL segment and Tarunam tenant id), display name,
 // signing secret (from .env, server-side only), time zone, and accent colour.
 export const TENANTS = {
   'glow-studio': {

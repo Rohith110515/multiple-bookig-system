@@ -1,170 +1,318 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import { TENANTS } from '../lib/tenants.js';
-import { tarunam } from '../lib/tarunam.js';
+import { tarunam, formatTime } from '../lib/tarunam.js';
 
 const user = Astro.locals.user;
-const first = (user?.name ?? '').trim().split(/\s+/)[0] || 'there';
+const now = new Date();
+const in7Days = new Date(now.getTime() + 7 * 24 * 3600 * 1000);
 
-const HEX = /^#[0-9a-fA-F]{6}$/;
-function fallbackColor(slug) {
-  let hash = 0;
-  for (const ch of slug) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
-  return `hsl(${hash % 360} 62% 46%)`;
-}
+const studios = await Promise.all(
+  Object.values(TENANTS).map(async (t) => {
+    let classes = [];
+    let upcoming = [];
+    try {
+      const [resR, resS] = await Promise.all([
+        tarunam('GET', '/resources', { tenant: t }),
+        tarunam('GET', '/schedules', {
+          tenant: t,
+          query: { from: now.toISOString(), to: in7Days.toISOString(), limit: 100 },
+        }),
+      ]);
+      if (resR.status === 200 && Array.isArray(resR.data)) classes = resR.data;
+      if (resS.status === 200 && Array.isArray(resS.data)) {
+        upcoming = resS.data
+          .filter((s) => Date.parse(s.start_time) > now.getTime() && s.seats_left > 0)
+          .sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time));
+      }
+    } catch {
+      // Keep card usable even if a studio's API is temporarily unreachable
+    }
 
-// Only safe, display-only fields are copied for the page. The signing secret never leaves the server.
-const tenants = Object.values(TENANTS);
-const studios = tenants.map((s) => ({
-  slug: s.slug,
-  name: s.name,
-  color: HEX.test(s.color ?? '') ? s.color : fallbackColor(s.slug),
-  classes: null,
-}));
+    const nextSession = upcoming[0] ?? null;
+    const totalOpenSeats = upcoming.reduce((sum, s) => sum + (s.seats_left ?? 0), 0);
 
-// Optional extra: how many classes each studio offers.
-// If a studio cannot be reached, the card simply shows no count.
-const results = await Promise.allSettled(tenants.map((s) => tarunam('GET', '/resources', { tenant: s })));
-results.forEach((r, i) => {
-  if (r.status === 'fulfilled' && r.value?.status === 200 && Array.isArray(r.value.data)) {
-    studios[i].classes = r.value.data.length;
-  }
-});
+    return {
+      slug: t.slug,
+      name: t.name,
+      color: t.color || '#4f46e5',
+      initial: (t.name || 'S').trim().charAt(0).toUpperCase(),
+      classCount: classes.length,
+      classNames: classes.map((c) => c.name),
+      nextSession,
+      totalOpenSeats,
+    };
+  })
+);
 ---
-<Layout title="Choose a studio">
-  <section class="page-head home-head">
-    <p class="eyebrow">Welcome back</p>
-    <h1>Hi {first}, where to today?</h1>
-    <p class="muted">Choose a studio to see its timetable. Each studio keeps its own classes and bookings.</p>
+
+<Layout title="All Studios">
+  <section class="dir-hero">
+    <div class="dir-hero-copy">
+      <p class="dir-kicker">{user ? `WELCOME BACK, ${user.name.toUpperCase()}` : 'MULTI-STUDIO TIMETABLE'}</p>
+      <h1>{user ? `Hi ${user.name}, where to today?` : 'Pick your space, claim your spot.'}</h1>
+      <p class="dir-sub">
+        Every studio runs its own schedule, capacity rules, and live seat availability. Jump into a timetable or catch the next open class.
+      </p>
+    </div>
+    <div class="dir-pulse">
+      <span class="pulse-dot" aria-hidden="true"></span>
+      <span><strong>{studios.length}</strong> active studios</span>
+      <span class="pulse-sep">•</span>
+      <span><strong>{studios.reduce((a, s) => a + s.totalOpenSeats, 0)}</strong> open seats this week</span>
+    </div>
   </section>
 
-  {studios.length === 0 ? (
-    <p class="alert">No studios are set up yet. Add one in <code>src/lib/tenants.js</code>.</p>
-  ) : (
-    <ul class="studio-grid">
-      {studios.map((s, i) => (
-        <li>
-          <a class="studio-card" href={`/${s.slug}`} style={`--c:${s.color};--i:${i}`}>
-            <div class="cover" aria-hidden="true">
-              <span class="initial">{s.name.charAt(0).toUpperCase()}</span>
+  <section class="studio-grid" aria-label="Studios">
+    {studios.map((st) => (
+      <article class="studio-card" style={`--st-color: ${st.color};`}>
+        <a class="studio-card-link" href={`/${st.slug}`}>
+          <div class="studio-banner">
+            <span class="studio-badge">{st.classCount} {st.classCount === 1 ? 'class' : 'classes'}</span>
+            <div class="studio-avatar" aria-hidden="true">{st.initial}</div>
+            <div class="studio-titles">
+              <h2>{st.name}</h2>
+              <span class="studio-slug">/{st.slug}</span>
             </div>
-            <div class="body">
-              <div class="text">
-                <strong>{s.name}</strong>
-                <span class="sub">/{s.slug}</span>
-                {s.classes != null && (
-                  <span class="info">{s.classes} {s.classes === 1 ? 'class' : 'classes'}</span>
-                )}
-              </div>
-              <span class="go">Open timetable →</span>
+          </div>
+
+          <div class="studio-body">
+            {st.classNames.length > 0 && (
+              <ul class="studio-tags" aria-label="Classes offered">
+                {st.classNames.slice(0, 4).map((cname) => (
+                  <li>{cname}</li>
+                ))}
+                {st.classNames.length > 4 && <li>+{st.classNames.length - 4} more</li>}
+              </ul>
+            )}
+
+            <div class="studio-next">
+              {st.nextSession ? (
+                <>
+                  <span class="next-pill">Next open</span>
+                  <strong>{st.nextSession.resource_name}</strong>
+                  <span class="muted">
+                    {formatTime(st.nextSession.start_time)} · {st.nextSession.seats_left} {st.nextSession.seats_left === 1 ? 'seat' : 'seats'} left
+                  </span>
+                </>
+              ) : (
+                <span class="muted">Explore upcoming timetable &amp; rules</span>
+              )}
             </div>
-          </a>
-        </li>
-      ))}
-    </ul>
-  )}
+
+            <div class="studio-cta">
+              <span>Open timetable</span>
+              <span class="cta-arrow" aria-hidden="true">→</span>
+            </div>
+          </div>
+        </a>
+      </article>
+    ))}
+  </section>
 </Layout>
 
 <style>
-  .home-head .eyebrow {
+  .dir-hero {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem 2rem;
+    padding: 2.2rem 0 1.4rem;
+  }
+  .dir-kicker {
     margin: 0 0 0.35rem;
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-weight: 700;
-    color: var(--brand-dark, #4338ca);
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    color: var(--brand);
+  }
+  .dir-hero h1 {
+    margin: 0;
+    font-size: clamp(1.9rem, 4vw, 2.6rem);
+    letter-spacing: -0.03em;
+  }
+  .dir-sub {
+    margin: 0.45rem 0 0;
+    max-width: 58ch;
+    color: var(--muted);
+    font-size: 0.98rem;
+  }
+  .dir-pulse {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.55rem 1rem;
+    border-radius: 999px;
+    background: #fff;
+    border: 1px solid var(--line);
+    font-size: 0.86rem;
+    color: var(--ink);
+    box-shadow: var(--shadow-sm);
+  }
+  .pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.18);
+  }
+  .pulse-sep {
+    color: #cbd5e1;
   }
 
   .studio-grid {
-    list-style: none;
-    margin: 0;
-    padding: 0;
     display: grid;
-    gap: 1.1rem;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+    gap: 1.4rem;
+    margin-top: 0.5rem;
   }
-
   .studio-card {
+    border-radius: 22px;
+    background: #fff;
+    border: 1px solid var(--line);
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+    transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+  }
+  .studio-card:hover {
+    transform: translateY(-4px);
+    border-color: color-mix(in srgb, var(--st-color) 45%, transparent);
+    box-shadow: 0 18px 38px color-mix(in srgb, var(--st-color) 16%, transparent);
+  }
+  .studio-card-link {
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: #fff;
-    border: 1px solid var(--line, #e2e8f0);
-    border-radius: 20px;
-    overflow: hidden;
     text-decoration: none;
     color: inherit;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
-    transition: box-shadow 0.2s, transform 0.2s;
-    animation: rise 0.45s ease backwards;
-    animation-delay: calc(var(--i, 0) * 70ms);
   }
-  .studio-card:hover {
-    box-shadow: 0 14px 32px rgba(15, 23, 42, 0.14);
-    transform: translateY(-4px);
-  }
-  .studio-card:focus-visible {
-    outline: 3px solid rgba(79, 70, 229, 0.45);
-    outline-offset: 3px;
-  }
-
-  .cover {
+  .studio-banner {
     position: relative;
-    height: 116px;
-    display: grid;
-    place-items: center;
     overflow: hidden;
-    background: var(--c);
-    background: linear-gradient(135deg, color-mix(in srgb, var(--c) 72%, #000), var(--c));
-  }
-  .cover::before,
-  .cover::after {
-    content: "";
-    position: absolute;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.13);
-  }
-  .cover::before { width: 160px; height: 160px; right: -44px; top: -70px; }
-  .cover::after  { width: 96px; height: 96px; left: -22px; bottom: -44px; }
-  .initial {
-    position: relative;
-    font-size: 3rem;
-    font-weight: 800;
+    padding: 1.5rem 1.5rem 1.35rem;
     color: #fff;
-    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
-  }
-
-  .body {
+    background: linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--st-color) 82%, #000),
+      var(--st-color)
+    );
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 1rem;
-    padding: 1rem 1.2rem 1.2rem;
-    flex: 1;
   }
-  .text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
-  .text strong { font-size: 1.12rem; }
-  .sub { color: var(--muted, #64748b); font-size: 0.85rem; }
-  .info {
-    align-self: flex-start;
-    margin-top: 0.35rem;
+  .studio-banner::after {
+    content: "";
+    position: absolute;
+    width: 180px;
+    height: 180px;
+    border-radius: 50%;
+    right: -45px;
+    top: -65px;
+    background: rgba(255, 255, 255, 0.13);
+    pointer-events: none;
+  }
+  .studio-badge {
+    position: absolute;
+    top: 0.95rem;
+    right: 1rem;
+    z-index: 2;
     font-size: 0.74rem;
     font-weight: 700;
-    padding: 0.15rem 0.65rem;
+    padding: 0.22rem 0.65rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+  }
+  .studio-avatar {
+    position: relative;
+    z-index: 1;
+    width: 52px;
+    height: 52px;
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    display: grid;
+    place-items: center;
+    font-size: 1.45rem;
+    font-weight: 850;
+    flex: none;
+  }
+  .studio-titles {
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+  }
+  .studio-titles h2 {
+    margin: 0;
+    color: #fff;
+    font-size: 1.35rem;
+  }
+  .studio-slug {
+    font-size: 0.84rem;
+    opacity: 0.85;
+  }
+
+  .studio-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1.3rem 1.5rem 1.4rem;
+    flex: 1;
+  }
+  .studio-tags {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .studio-tags li {
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.24rem 0.65rem;
     border-radius: 999px;
     background: #f1f5f9;
     color: #334155;
   }
-  .go { color: var(--c); font-weight: 700; font-size: 0.9rem; white-space: nowrap; }
-
-  @keyframes rise {
-    from { opacity: 0; transform: translateY(12px); }
-    to { opacity: 1; transform: none; }
+  .studio-next {
+    margin-top: auto;
+    padding: 0.85rem 0.95rem;
+    border-radius: 14px;
+    background: #f8fafc;
+    border: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
   }
-  @media (prefers-reduced-motion: reduce) {
-    .studio-card { animation: none; transition: none; }
+  .next-pill {
+    align-self: flex-start;
+    font-size: 0.68rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--st-color);
   }
-  @media (max-width: 480px) {
-    .body { flex-direction: column; align-items: flex-start; }
+  .studio-next strong {
+    font-size: 0.96rem;
+  }
+  .studio-next span:last-child {
+    font-size: 0.82rem;
+  }
+  .studio-cta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-weight: 750;
+    font-size: 0.94rem;
+    color: var(--st-color);
+    padding-top: 0.2rem;
+  }
+  .cta-arrow {
+    transition: transform 0.2s ease;
+  }
+  .studio-card:hover .cta-arrow {
+    transform: translateX(4px);
   }
 </style>

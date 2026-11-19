@@ -1,4 +1,5 @@
 ---
+import '@fontsource-variable/inter';
 import '../styles/global.css';
 
 const { title = 'Sessions' } = Astro.props;
@@ -6,19 +7,54 @@ const user = Astro.locals.user;
 const tenant = Astro.locals.tenant;
 const path = Astro.url.pathname.replace(/\/+$/, '') || '/';
 const base = tenant ? `/${tenant.slug}` : '';
+
+// ---- Studio theme: one colour in, a darker and a lighter shade out ----
+const HEX = /^#[0-9a-fA-F]{6}$/;
+const brand = HEX.test(tenant?.color ?? '') ? tenant.color : '#4f46e5';
+
+// Moves a #rrggbb colour toward black (0) or white (255) by a fraction
+function mix(hex, target, amount) {
+  const n = parseInt(hex.slice(1), 16);
+  const channels = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) => Math.round(c + (target - c) * amount));
+  return '#' + channels.map((c) => c.toString(16).padStart(2, '0')).join('');
+}
+
+// Only colour values go into this string. The studio's secret is never used here.
+const themeStyle = tenant
+  ? `--brand:${brand};--brand-dark:${mix(brand, 0, 0.18)};--brand-soft:${mix(brand, 255, 0.9)}`
+  : '';
+
+// Tab icon: the studio's colour with its initial (letters and digits only, so nothing can break the SVG)
+const rawInitial = (tenant?.name ?? 'T').trim().charAt(0).toUpperCase();
+const initial = /^[A-Z0-9]$/.test(rawInitial) ? rawInitial : 'T';
+const iconSvg =
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">` +
+  `<rect width="64" height="64" rx="16" fill="${brand}"/>` +
+  `<text x="32" y="45" font-size="36" font-weight="700" text-anchor="middle" fill="#fff" font-family="Arial,sans-serif">${initial}</text>` +
+  `</svg>`;
+const favicon = `data:image/svg+xml,${encodeURIComponent(iconSvg)}`;
 ---
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content={brand} />
+    <link rel="icon" href={favicon} />
     <title>{title} | {tenant ? tenant.name : 'Tarunam Studios'}</title>
   </head>
-  <body>
+  <body class:list={[{ themed: !!tenant }]} style={themeStyle}>
     <header class="site-header">
       <div class="wrap nav">
         <a href={base || '/'} class="logo">
-          {tenant ? tenant.name : <>Tarunam<span>Studios</span></>}
+          {tenant ? (
+            <>
+              <span class="tl-mark" aria-hidden="true">{tenant.name.charAt(0).toUpperCase()}</span>
+              <span>{tenant.name}</span>
+            </>
+          ) : (
+            <>Tarunam<span>Studios</span></>
+          )}
         </a>
 
         <nav>
@@ -53,5 +89,93 @@ const base = tenant ? `/${tenant.slug}` : '';
     <footer class="site-footer">
       <div class="wrap muted">Demo front end for the Tarunam booking API. Demo sign-in only, no payments.</div>
     </footer>
+
+    <!-- Toast messages: call window.toast('Text', 'ok' | 'err') from any page script -->
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
   </body>
 </html>
+
+<script is:inline>
+  // Toasts
+  (function () {
+    var region = document.getElementById('toast-region');
+    if (!region) return;
+    window.toast = function (message, kind, duration) {
+      var el = document.createElement('div');
+      el.className = 'toast ' + (kind || '');
+      el.textContent = String(message); // textContent, so a message can never inject HTML
+      region.appendChild(el);
+      function remove() {
+        if (!el.parentNode) return;
+        el.classList.add('leaving');
+        setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 220);
+      }
+      el.addEventListener('click', remove);
+      setTimeout(remove, duration || 4200);
+    };
+  })();
+
+  // Header gets a soft shadow once the page scrolls
+  (function () {
+    var header = document.querySelector('.site-header');
+    if (!header) return;
+    function update() { header.classList.toggle('scrolled', window.scrollY > 4); }
+    update();
+    window.addEventListener('scroll', update, { passive: true });
+  })();
+</script>
+
+<style is:global>
+  /* ---------- Typography ---------- */
+  html { scroll-behavior: smooth; scroll-padding-top: 5rem; }
+  body, button, input, select, textarea {
+    font-family: 'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+  body {
+    font-feature-settings: 'cv11', 'ss01';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3 { text-wrap: balance; letter-spacing: -0.02em; }
+  body ::selection { background: var(--brand-soft, #eef2ff); color: var(--brand-dark, #4338ca); }
+
+  /* ---------- Header: pinned, with a shadow once scrolled ---------- */
+  .site-header { position: sticky; top: 0; z-index: 30; transition: box-shadow 0.2s ease; view-transition-name: site-header; }
+  .site-header.scrolled { box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08); }
+
+  /* ---------- Smooth page-to-page transitions (browsers without support simply skip them) ---------- */
+  @media (prefers-reduced-motion: no-preference) {
+    @view-transition { navigation: auto; }
+  }
+  ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 0.18s; }
+  ::view-transition-old(site-header), ::view-transition-new(site-header) { animation: none; }
+
+  /* ---------- Toasts ---------- */
+  .toast-region { position: fixed; z-index: 100; left: 50%; bottom: 1.25rem; transform: translateX(-50%); display: grid; gap: 0.5rem; width: min(420px, calc(100vw - 2rem)); pointer-events: none; }
+  .toast { pointer-events: auto; display: flex; align-items: center; gap: 0.7rem; padding: 0.8rem 1rem; background: #0f172a; color: #fff; border-radius: 12px; font-size: 0.92rem; box-shadow: 0 14px 34px rgba(15, 23, 42, 0.28); cursor: pointer; animation: toast-in 0.25s ease both; }
+  .toast::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: #94a3b8; flex: none; }
+  .toast.ok::before { background: #22c55e; }
+  .toast.err::before { background: #f87171; }
+  .toast.leaving { animation: toast-out 0.2s ease forwards; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(12px) scale(0.97); } to { opacity: 1; transform: none; } }
+  @keyframes toast-out { to { opacity: 0; transform: translateY(8px) scale(0.97); } }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .toast, .toast.leaving { animation: none; }
+  }
+
+  /* ---------- Studio theme (unchanged from Step 6). Applies only inside a studio. ---------- */
+  body.themed .site-header { border-top: 3px solid var(--brand); }
+  body.themed .logo { display: inline-flex; align-items: center; gap: 0.55rem; }
+  .tl-mark { width: 30px; height: 30px; border-radius: 9px; background: linear-gradient(135deg, var(--brand-dark), var(--brand)); color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 0.95rem; flex: none; }
+
+  body.themed .btn:not(.btn-ghost) { background: var(--brand); color: #fff; }
+  body.themed .btn:not(.btn-ghost):hover:not(:disabled) { background: var(--brand-dark); }
+  body.themed .btn-ghost:hover:not(:disabled) { background: var(--brand-soft); }
+  body.themed .chip.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+  body.themed .chip:hover:not(.active) { background: var(--brand-soft); }
+  body.themed .site-header nav a.active { background: var(--brand-soft); color: var(--brand-dark); }
+  body.themed .link { color: var(--brand-dark); }
+  body.themed .note { background: var(--brand-soft); color: var(--brand-dark); }
+  body.themed :focus-visible { outline-color: var(--brand); }
+</style>
