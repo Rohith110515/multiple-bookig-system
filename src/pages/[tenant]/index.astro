@@ -1,4 +1,3 @@
-
 ---
 import Layout from '../../layouts/Layout.astro';
 import { tarunam, friendlyError, formatTime, formatDay } from '../../lib/tarunam.js';
@@ -9,6 +8,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const tz = tenant.timeZone || 'Asia/Kolkata';
 
+// Date helpers. Days are "YYYY-MM-DD" keys in the studio's time zone, so no zone can shift a day.
 const keyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz });
 const keyOf = (iso) => keyFmt.format(new Date(iso));
 const addDays = (key, n) => {
@@ -19,6 +19,34 @@ const utcFmt = (options) => new Intl.DateTimeFormat('en-IN', { timeZone: 'UTC', 
 const longFmt = utcFmt({ weekday: 'long', day: 'numeric', month: 'long' });
 const shortFmt = utcFmt({ weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 const labelOf = (key, formatter) => formatter.format(new Date(`${key}T00:00:00Z`));
+
+// ---- Presentation helpers for the session cards ----
+const ICONS = [
+  [/yoga|stretch|mobility|meditat/i, '🧘'],
+  [/pilates|barre/i, '🤸'],
+  [/hiit|cardio|circuit|bootcamp|conditioning/i, '🔥'],
+  [/spin|cycl|bike/i, '🚴'],
+  [/box|kick|mma|martial/i, '🥊'],
+  [/strength|weight|lift|power|crossfit|heavy/i, '🏋️'],
+  [/swim|aqua/i, '🏊'],
+  [/danc|zumba/i, '💃'],
+  [/run|treadmill/i, '🏃'],
+];
+// An emoji and a colour (hue) for a class name, so every class looks distinct
+function classLook(name) {
+  const text = String(name ?? '');
+  const match = ICONS.find(([pattern]) => pattern.test(text));
+  let hash = 0;
+  for (const ch of text) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+  return { icon: match ? match[1] : '✨', hue: hash % 360 };
+}
+const hourFmt = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: 'numeric', hourCycle: 'h23' });
+const partOf = (iso) => {
+  const hour = Number(hourFmt.format(new Date(iso)));
+  return hour < 12 ? 'Morning' : hour < 17 ? 'Afternoon' : 'Evening';
+};
+const PART_ICON = { Morning: '🌅', Afternoon: '☀️', Evening: '🌙' };
+const minutesBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 60000);
 
 const params = Astro.url.searchParams;
 const resourceParam = params.get('resource') ?? '';
@@ -36,48 +64,21 @@ try {
     tarunam('GET', '/resources', { tenant }),
     tarunam('GET', '/settings', { tenant }),
   ]);
-
   if (r.status === 200) resources = r.data;
   if (st.status === 200) settings = st.data;
 
+  // How far ahead can a visitor book? Use the studio's rule, up to 30 days.
   const minutes = settings?.max_horizon_minutes;
   if (minutes) horizonDays = Math.min(Math.max(Math.ceil(minutes / 1440), 1), 30);
 
   const from = new Date();
   const to = new Date(from.getTime() + (horizonDays + 2) * 24 * 3600 * 1000);
-
   const s = await tarunam('GET', '/schedules', {
     tenant,
     query: { from: from.toISOString(), to: to.toISOString(), limit: 500 },
   });
-
-  // TEMPORARY DEBUG: compare tenant-specific resources and schedule details.
-  console.log('[SCHEDULE DEBUG]', {
-    tenant: tenant.slug,
-    status: s.status,
-
-    resources: resources.map((r) => ({
-      id: r.id,
-      name: r.name,
-    })),
-
-    schedules: Array.isArray(s.data)
-      ? s.data.slice(0, 5).map((item) => ({
-          id: item.id,
-          resource_id: item.resource_id,
-          resource_name: item.resource_name,
-          start_time: item.start_time,
-          end_time: item.end_time,
-          capacity: item.capacity,
-        }))
-      : s.data,
-  });
-
-  if (s.status !== 200) {
-    error = friendlyError(s).message;
-  } else {
-    allSessions = s.data;
-  }
+  if (s.status !== 200) error = friendlyError(s).message;
+  else allSessions = s.data;
 } catch (err) {
   console.error('[ui] could not reach the booking service:', err.message);
   error = 'The booking service is unavailable right now. Please try again in a moment.';
@@ -86,31 +87,34 @@ try {
 const minKey = todayKey;
 const maxKey = addDays(todayKey, horizonDays);
 
-const sessions = resourceId
-  ? allSessions.filter((s) => s.resource_id === resourceId)
-  : allSessions;
-
+// The class filter applies first, so the calendar dots match the chosen class
+const sessions = resourceId ? allSessions.filter((s) => s.resource_id === resourceId) : allSessions;
 const withSessions = [...new Set(sessions.map((s) => keyOf(s.start_time)))]
   .filter((k) => k >= minKey && k <= maxKey)
   .sort();
 
+// Chosen date: from the URL if valid, otherwise the first day that has sessions
 const requested = params.get('date') ?? '';
 const validRequested = DATE.test(requested) && requested >= minKey && requested <= maxKey;
 const selected = validRequested ? requested : (withSessions[0] ?? todayKey);
 
 const daySessions = sessions.filter((s) => keyOf(s.start_time) === selected);
-const dayLabel = daySessions.length > 0
-  ? formatDay(daySessions[0].start_time)
-  : labelOf(selected, longFmt);
-
+const dayLabel = daySessions.length > 0 ? formatDay(daySessions[0].start_time) : labelOf(selected, longFmt);
 const nextAvailable = withSessions.find((k) => k > selected) ?? null;
 const prevKey = selected > minKey ? addDays(selected, -1) : null;
 const nextKey = selected < maxKey ? addDays(selected, 1) : null;
-const relative = selected === todayKey
-  ? 'Today'
-  : selected === addDays(todayKey, 1)
-    ? 'Tomorrow'
-    : '';
+const relative = selected === todayKey ? 'Today' : selected === addDays(todayKey, 1) ? 'Tomorrow' : '';
+const seatsOpen = daySessions.reduce((sum, s) => sum + s.seats_left, 0);
+
+// Group the day's sessions into Morning / Afternoon / Evening (numbered for the entrance animation)
+let counter = 0;
+const parts = ['Morning', 'Afternoon', 'Evening']
+  .map((name) => ({
+    name,
+    icon: PART_ICON[name],
+    items: daySessions.filter((s) => partOf(s.start_time) === name).map((s) => ({ s, n: counter++ })),
+  }))
+  .filter((p) => p.items.length > 0);
 
 function link({ date = selected, resource = resourceId } = {}) {
   const query = new URLSearchParams({ date });
@@ -120,16 +124,9 @@ function link({ date = selected, resource = resourceId } = {}) {
 
 const loginHref = `/login?next=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`;
 const rules = [];
-
-if (settings?.min_lead_minutes != null) {
-  rules.push(`Booking closes ${settings.min_lead_minutes} minutes before the start.`);
-}
-
-if (settings?.min_cancel_notice_minutes) {
-  rules.push(`Cancel up to ${settings.min_cancel_notice_minutes} minutes before the start.`);
-}
+if (settings?.min_lead_minutes != null) rules.push(`Booking closes ${settings.min_lead_minutes} minutes before the start.`);
+if (settings?.min_cancel_notice_minutes) rules.push(`Cancel up to ${settings.min_cancel_notice_minutes} minutes before the start.`);
 ---
-
 <Layout title="Sessions">
   <section class="page-head">
     <h1>Book a session</h1>
@@ -156,22 +153,18 @@ if (settings?.min_cancel_notice_minutes) {
       >
         <button type="button" class="dp-trigger" data-dp-trigger aria-haspopup="dialog" aria-expanded="false">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="18" rx="2"></rect>
-            <path d="M16 2v4M8 2v4M3 10h18"></path>
+            <rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path>
           </svg>
           <span>{labelOf(selected, shortFmt)}</span>
           <span class="dp-chev" aria-hidden="true">▾</span>
         </button>
-
         <div class="dp-panel" data-dp-panel hidden role="dialog" aria-label="Choose a date">
           <div class="dp-head">
             <button type="button" class="dp-nav" data-dp-prev aria-label="Previous month">‹</button>
             <strong data-dp-title></strong>
             <button type="button" class="dp-nav" data-dp-next aria-label="Next month">›</button>
           </div>
-          <div class="dp-weekdays">
-            <span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span><span>Su</span>
-          </div>
+          <div class="dp-weekdays"><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span><span>Su</span></div>
           <div class="dp-grid" data-dp-grid></div>
           <div class="dp-legend"><i></i> Sessions available</div>
         </div>
@@ -181,17 +174,13 @@ if (settings?.min_cancel_notice_minutes) {
         ? <a class="dp-nav" href={link({ date: nextKey })} aria-label="Next day">›</a>
         : <span class="dp-nav" aria-disabled="true">›</span>}
 
-      {selected !== todayKey && (
-        <a class="btn btn-sm btn-ghost" href={link({ date: todayKey })}>Today</a>
-      )}
+      {selected !== todayKey && <a class="btn btn-sm btn-ghost" href={link({ date: todayKey })}>Today</a>}
     </div>
 
     <div class="chips" aria-label="Class">
       <a class:list={['chip', { active: !resourceId }]} href={link({ resource: '' })}>All classes</a>
       {resources.map((r) => (
-        <a class:list={['chip', { active: r.id === resourceId }]} href={link({ resource: r.id })}>
-          {r.name}
-        </a>
+        <a class:list={['chip', { active: r.id === resourceId }]} href={link({ resource: r.id })}>{classLook(r.name).icon} {r.name}</a>
       ))}
     </div>
   </div>
@@ -208,54 +197,70 @@ if (settings?.min_cancel_notice_minutes) {
   )}
 
   {daySessions.length > 0 && (
-    <section class="day">
+    <div class="sx-dayhead">
       <h2>{dayLabel} {relative && <span class="dp-pill">{relative}</span>}</h2>
+      <span class="muted">{daySessions.length} {daySessions.length === 1 ? 'session' : 'sessions'} · {seatsOpen} {seatsOpen === 1 ? 'seat' : 'seats'} open</span>
+    </div>
+  )}
+
+  {parts.map((part) => (
+    <section class="sx-group">
+      <h3 class="sx-part"><span aria-hidden="true">{part.icon}</span> {part.name} <span class="sx-count">· {part.items.length}</span></h3>
       <ul class="sessions">
-        {daySessions.map((s) => (
-          <li class="session" data-capacity={s.capacity}>
-            <div class="when">{formatTime(s.start_time)} – {formatTime(s.end_time)}</div>
-            <div class="what">
-              <strong>{s.resource_name}</strong>
-              <span class="seats" data-seats-label>
-                {s.seats_left === 0 ? 'Fully booked' : `${s.seats_left} of ${s.capacity} seats left`}
-              </span>
-            </div>
-            {user ? (
-              <button
-                class="btn btn-sm"
-                type="button"
-                data-book
-                data-id={s.id}
-                data-name={s.resource_name}
-                data-when={`${dayLabel}, ${formatTime(s.start_time)}`}
-                data-seats={s.seats_left}
-                disabled={s.seats_left === 0}
-              >
-                {s.seats_left === 0 ? 'Full' : 'Book'}
-              </button>
-            ) : (
-              <a class="btn btn-sm btn-ghost" href={loginHref}>Sign in to book</a>
-            )}
-          </li>
-        ))}
+        {part.items.map(({ s, n }) => {
+          const look = classLook(s.resource_name);
+          const pct = Math.round(((s.capacity - s.seats_left) / s.capacity) * 100);
+          const low = s.seats_left > 0 && s.seats_left <= 3;
+          const full = s.seats_left === 0;
+          const startsInMin = (Date.parse(s.start_time) - Date.now()) / 60000;
+          const soon = startsInMin > 0 && startsInMin <= 120;
+          return (
+            <li class="session sx" style={`--hue:${look.hue};--i:${n}`} data-capacity={s.capacity}>
+              <div class="sx-icon" aria-hidden="true">{look.icon}</div>
+              <div class="sx-main">
+                <div class="sx-title">
+                  <strong>{s.resource_name}</strong>
+                  {soon && <span class="sx-tag sx-soon">Starting soon</span>}
+                  <span class="sx-tag sx-hot" data-low hidden={!low}>Only {s.seats_left} left</span>
+                </div>
+                <div class="sx-meta">{formatTime(s.start_time)} – {formatTime(s.end_time)} · {minutesBetween(s.start_time, s.end_time)} min</div>
+                <div class:list={['sx-meter', { low, full }]} data-meter><i style={`width:${pct}%`}></i></div>
+                <span class="seats" data-seats-label>
+                  {full ? 'Fully booked' : `${s.seats_left} of ${s.capacity} seats left`}
+                </span>
+              </div>
+              {user ? (
+                <button
+                  class="btn btn-sm"
+                  type="button"
+                  data-book
+                  data-id={s.id}
+                  data-name={s.resource_name}
+                  data-when={`${dayLabel}, ${formatTime(s.start_time)}`}
+                  data-seats={s.seats_left}
+                  disabled={full}
+                >
+                  {full ? 'Full' : 'Book'}
+                </button>
+              ) : (
+                <a class="btn btn-sm btn-ghost" href={loginHref}>Sign in to book</a>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </section>
-  )}
+  ))}
 
   {user && (
     <dialog id="book-dialog" data-tenant={tenant.slug} aria-labelledby="bd-title">
       <div class="dialog-body">
         <h2 id="bd-title">Confirm booking</h2>
-        <p style="margin:0">
-          <strong id="bd-name"></strong><br />
-          <span id="bd-when" class="muted"></span>
-        </p>
+        <p style="margin:0"><strong id="bd-name"></strong><br /><span id="bd-when" class="muted"></span></p>
         <label for="bd-guests">Guests</label>
         <select id="bd-guests" class="input"></select>
         <p id="bd-msg" class="msg" role="status" aria-live="polite"></p>
-        <p id="bd-done" hidden>
-          <a class="link" href={`/${tenant.slug}/bookings`}>View my bookings →</a>
-        </p>
+        <p id="bd-done" hidden><a class="link" href={`/${tenant.slug}/bookings`}>View my bookings →</a></p>
         <div class="dialog-actions">
           <button type="button" class="btn btn-ghost" id="bd-close">Close</button>
           <button type="button" class="btn" id="bd-confirm">Confirm booking</button>
@@ -265,9 +270,9 @@ if (settings?.min_cancel_notice_minutes) {
   )}
 </Layout>
 
+<!-- Booking script: unchanged from your working version -->
 <script is:inline>
   const dialog = document.getElementById('book-dialog');
-
   if (dialog) {
     const tenantSlug = dialog.dataset.tenant;
     const $ = (id) => document.getElementById(id);
@@ -276,82 +281,55 @@ if (settings?.min_cancel_notice_minutes) {
     const confirmBtn = $('bd-confirm');
     const done = $('bd-done');
     let current = null;
-
     function setMsg(text, kind) {
       msg.textContent = text;
       msg.className = 'msg ' + (kind || '');
     }
-
     function updateCard(card, left) {
       const label = card.querySelector('[data-seats-label]');
       const button = card.querySelector('[data-book]');
-      label.textContent = left === 0
-        ? 'Fully booked'
-        : left + ' of ' + card.dataset.capacity + ' seats left';
+      label.textContent = left === 0 ? 'Fully booked' : left + ' of ' + card.dataset.capacity + ' seats left';
       button.dataset.seats = String(left);
       button.disabled = left === 0;
       button.textContent = left === 0 ? 'Full' : 'Book';
     }
-
     document.addEventListener('click', (e) => {
       const button = e.target.closest('[data-book]');
       if (!button || button.disabled) return;
-
-      current = {
-        id: button.dataset.id,
-        card: button.closest('.session'),
-        nonce: crypto.randomUUID()
-      };
-
+      current = { id: button.dataset.id, card: button.closest('.session'), nonce: crypto.randomUUID() };
       $('bd-name').textContent = button.dataset.name;
       $('bd-when').textContent = button.dataset.when;
       guests.innerHTML = '';
-
       const max = Math.min(Number(button.dataset.seats), 6);
-
       for (let n = 1; n <= max; n++) {
         const option = document.createElement('option');
         option.value = String(n);
         option.textContent = n === 1 ? '1 guest' : n + ' guests';
         guests.append(option);
       }
-
       setMsg('');
       done.hidden = true;
       confirmBtn.hidden = false;
       confirmBtn.disabled = false;
       dialog.showModal();
     });
-
     $('bd-close').addEventListener('click', () => dialog.close());
-
     confirmBtn.addEventListener('click', async () => {
       if (!current) return;
-
       confirmBtn.disabled = true;
       setMsg('Booking…');
-
       try {
         const res = await fetch(`/api/${tenantSlug}/book`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            schedule_id: current.id,
-            guests: Number(guests.value),
-            nonce: current.nonce
-          }),
+          body: JSON.stringify({ schedule_id: current.id, guests: Number(guests.value), nonce: current.nonce }),
         });
-
         const data = await res.json().catch(() => ({}));
-
         if (res.ok) {
           setMsg('You are booked!', 'ok');
           done.hidden = false;
           confirmBtn.hidden = true;
-
-          if (typeof data.seats_left === 'number') {
-            updateCard(current.card, data.seats_left);
-          }
+          if (typeof data.seats_left === 'number') updateCard(current.card, data.seats_left);
         } else {
           setMsg(data.message || 'Something went wrong.', 'err');
           confirmBtn.disabled = false;
@@ -364,6 +342,7 @@ if (settings?.min_cancel_notice_minutes) {
   }
 </script>
 
+<!-- Calendar script: unchanged from Step 2 -->
 <script is:inline>
   (function () {
     var root = document.getElementById('datepicker');
@@ -382,24 +361,11 @@ if (settings?.min_cancel_notice_minutes) {
     var grid = root.querySelector('[data-dp-grid]');
     var prev = root.querySelector('[data-dp-prev]');
     var next = root.querySelector('[data-dp-next]');
+    var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-    var MONTHS = [
-      'January', 'February', 'March', 'April', 'May', 'June',
-      'July', 'August', 'September', 'October', 'November', 'December'
-    ];
-
-    function pad(n) {
-      return String(n).padStart(2, '0');
-    }
-
-    function keyOf(y, m, d) {
-      return y + '-' + pad(m + 1) + '-' + pad(d);
-    }
-
-    function parse(k) {
-      var p = k.split('-').map(Number);
-      return { y: p[0], m: p[1] - 1, d: p[2] };
-    }
+    function pad(n) { return String(n).padStart(2, '0'); }
+    function keyOf(y, m, d) { return y + '-' + pad(m + 1) + '-' + pad(d); }
+    function parse(k) { var p = k.split('-').map(Number); return { y: p[0], m: p[1] - 1, d: p[2] }; }
 
     var view = parse(selected);
 
@@ -417,45 +383,27 @@ if (settings?.min_cancel_notice_minutes) {
     function render() {
       title.textContent = MONTHS[view.m] + ' ' + view.y;
       grid.innerHTML = '';
-
-      var offset = (new Date(Date.UTC(view.y, view.m, 1)).getUTCDay() + 6) % 7;
+      var offset = (new Date(Date.UTC(view.y, view.m, 1)).getUTCDay() + 6) % 7; // weeks start on Monday
       var days = new Date(Date.UTC(view.y, view.m + 1, 0)).getUTCDate();
-
-      for (var i = 0; i < offset; i++) {
-        grid.append(document.createElement('span'));
-      }
-
+      for (var i = 0; i < offset; i++) grid.append(document.createElement('span'));
       for (var d = 1; d <= days; d++) {
         (function (day) {
           var k = keyOf(view.y, view.m, day);
           var button = document.createElement('button');
-
           button.type = 'button';
           button.className = 'dp-day';
           button.textContent = String(day);
           button.disabled = k < min || k > max;
-
           if (k === today) button.classList.add('is-today');
           if (k === selected) button.classList.add('is-selected');
           if (withSessions.has(k)) button.classList.add('has-sessions');
-
-          button.setAttribute(
-            'aria-label',
-            day + ' ' + MONTHS[view.m] + ' ' + view.y +
-            (withSessions.has(k) ? ', sessions available' : '')
-          );
-
-          button.addEventListener('click', function () {
-            go(k);
-          });
-
+          button.setAttribute('aria-label', day + ' ' + MONTHS[view.m] + ' ' + view.y + (withSessions.has(k) ? ', sessions available' : ''));
+          button.addEventListener('click', function () { go(k); });
           grid.append(button);
         })(d);
       }
-
       var lo = parse(min);
       var hi = parse(max);
-
       prev.disabled = view.y * 12 + view.m <= lo.y * 12 + lo.m;
       next.disabled = view.y * 12 + view.m >= hi.y * 12 + hi.m;
     }
@@ -464,226 +412,106 @@ if (settings?.min_cancel_notice_minutes) {
       var opening = panel.hidden;
       panel.hidden = !opening;
       trigger.setAttribute('aria-expanded', String(opening));
-
-      if (opening) {
-        view = parse(selected);
-        render();
-      }
+      if (opening) { view = parse(selected); render(); }
     });
+    prev.addEventListener('click', function () { view.m -= 1; if (view.m < 0) { view.m = 11; view.y -= 1; } render(); });
+    next.addEventListener('click', function () { view.m += 1; if (view.m > 11) { view.m = 0; view.y += 1; } render(); });
+    document.addEventListener('click', function (e) { if (!root.contains(e.target)) close(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+  })();
+</script>
 
-    prev.addEventListener('click', function () {
-      view.m -= 1;
-      if (view.m < 0) {
-        view.m = 11;
-        view.y -= 1;
-      }
-      render();
-    });
-
-    next.addEventListener('click', function () {
-      view.m += 1;
-      if (view.m > 11) {
-        view.m = 0;
-        view.y += 1;
-      }
-      render();
-    });
-
-    document.addEventListener('click', function (e) {
-      if (!root.contains(e.target)) close();
-    });
-
-    document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') close();
+<!-- Step 4 script: keeps each card's seat meter and "Only N left" tag in step with the booking script.
+     It only watches the button's data-seats value, so the booking script stays untouched. -->
+<script is:inline>
+  (function () {
+    var cards = document.querySelectorAll('.session.sx');
+    if (!cards.length || !('MutationObserver' in window)) return;
+    cards.forEach(function (card) {
+      var button = card.querySelector('[data-book]');
+      if (!button) return;
+      new MutationObserver(function () {
+        var cap = Number(card.dataset.capacity);
+        var left = Number(button.dataset.seats);
+        var meter = card.querySelector('[data-meter]');
+        var low = card.querySelector('[data-low]');
+        var isLow = left > 0 && left <= 3;
+        meter.firstElementChild.style.width = Math.round(((cap - left) / cap) * 100) + '%';
+        meter.classList.toggle('full', left === 0);
+        meter.classList.toggle('low', isLow);
+        low.hidden = !isLow;
+        low.textContent = 'Only ' + left + ' left';
+      }).observe(button, { attributes: true, attributeFilter: ['data-seats'] });
     });
   })();
 </script>
 
 <style is:global>
-  .datebar {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    margin-bottom: 0.8rem;
-  }
+  /* ---------- Calendar (Step 2) ---------- */
+  .datebar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+  .dp-nav { width: 40px; height: 40px; display: grid; place-items: center; border: 1px solid var(--line, #e2e8f0); background: #fff; border-radius: 10px; font: inherit; font-size: 1.2rem; line-height: 1; color: inherit; cursor: pointer; text-decoration: none; }
+  .dp-nav:hover:not([aria-disabled="true"]):not(:disabled) { background: var(--brand-soft, #eef2ff); }
+  .dp-nav[aria-disabled="true"], .dp-nav:disabled { opacity: 0.4; cursor: not-allowed; }
+  .dp-wrap { position: relative; }
+  .dp-trigger { display: flex; align-items: center; gap: 0.6rem; height: 40px; padding: 0 0.9rem; border: 1px solid var(--line, #e2e8f0); background: #fff; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; color: inherit; }
+  .dp-trigger:hover { border-color: var(--brand, #4f46e5); }
+  .dp-trigger svg { color: var(--brand, #4f46e5); flex: none; }
+  .dp-chev { color: var(--muted, #64748b); font-size: 0.8rem; }
+  .dp-panel { position: absolute; top: calc(100% + 8px); left: 0; z-index: 40; width: 300px; background: #fff; border: 1px solid var(--line, #e2e8f0); border-radius: 14px; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14); padding: 0.9rem; }
+  .dp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.6rem; }
+  .dp-weekdays, .dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; }
+  .dp-weekdays span { font-size: 0.72rem; color: var(--muted, #64748b); font-weight: 700; padding: 0.3rem 0; }
+  .dp-day { position: relative; aspect-ratio: 1; border: 0; background: transparent; border-radius: 9px; font: inherit; font-size: 0.88rem; cursor: pointer; color: inherit; }
+  .dp-day:hover:not(:disabled) { background: var(--brand-soft, #eef2ff); }
+  .dp-day:disabled { color: #cbd5e1; cursor: not-allowed; }
+  .dp-day.is-today { box-shadow: inset 0 0 0 1px var(--brand, #4f46e5); }
+  .dp-day.is-selected { background: var(--brand, #4f46e5); color: #fff; }
+  .dp-day.has-sessions::after { content: ""; position: absolute; bottom: 4px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--brand, #4f46e5); }
+  .dp-day.is-selected.has-sessions::after { background: #fff; }
+  .dp-legend { display: flex; align-items: center; gap: 0.45rem; font-size: 0.76rem; color: var(--muted, #64748b); margin-top: 0.6rem; }
+  .dp-legend i { width: 6px; height: 6px; border-radius: 50%; background: var(--brand, #4f46e5); display: inline-block; }
+  .dp-pill { display: inline-block; font-size: 0.74rem; font-weight: 700; padding: 0.1rem 0.6rem; border-radius: 999px; background: var(--brand-soft, #eef2ff); color: var(--brand-dark, #4338ca); vertical-align: middle; margin-left: 0.4rem; }
+  .filters .chips { margin-top: 0.2rem; }
 
-  .dp-nav {
-    width: 40px;
-    height: 40px;
+  /* ---------- Session cards (Step 4) ---------- */
+  .sx-dayhead { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin: 1rem 0 0.2rem; }
+  .sx-dayhead h2 { margin: 0; font-size: 1.3rem; }
+  .sx-part { display: flex; align-items: center; gap: 0.5rem; margin: 1.3rem 0 0.7rem; font-size: 1rem; font-weight: 800; }
+  .sx-count { font-weight: 600; font-size: 0.85rem; color: var(--muted, #64748b); }
+
+  .session.sx {
+    --accent: hsl(var(--hue) 70% 50%);
+    --tint: hsl(var(--hue) 85% 95%);
     display: grid;
-    place-items: center;
-    border: 1px solid var(--line, #e2e8f0);
-    background: #fff;
-    border-radius: 10px;
-    font: inherit;
-    font-size: 1.2rem;
-    line-height: 1;
-    color: inherit;
-    cursor: pointer;
-    text-decoration: none;
-  }
-
-  .dp-nav:hover:not([aria-disabled="true"]):not(:disabled) {
-    background: var(--brand-soft, #eef2ff);
-  }
-
-  .dp-nav[aria-disabled="true"],
-  .dp-nav:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .dp-wrap {
-    position: relative;
-  }
-
-  .dp-trigger {
-    display: flex;
+    grid-template-columns: 52px 1fr auto;
+    gap: 1rem;
     align-items: center;
-    gap: 0.6rem;
-    height: 40px;
-    padding: 0 0.9rem;
-    border: 1px solid var(--line, #e2e8f0);
-    background: #fff;
-    border-radius: 10px;
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-    color: inherit;
+    padding: 1rem 1.2rem 1rem 1rem;
+    border-left: 4px solid var(--accent);
+    transition: box-shadow 0.15s, transform 0.15s;
+    animation: sx-rise 0.4s ease backwards;
+    animation-delay: calc(var(--i, 0) * 50ms);
   }
+  .session.sx:hover { box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12); transform: translateY(-2px); }
+  .sx-icon { width: 52px; height: 52px; border-radius: 14px; background: var(--tint); display: grid; place-items: center; font-size: 1.6rem; }
+  .sx-main { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+  .sx-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .sx-title strong { font-size: 1.05rem; }
+  .sx-meta { color: var(--muted, #64748b); font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+  .sx-tag { display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 0.12rem 0.6rem; border-radius: 999px; white-space: nowrap; }
+  .sx-tag[hidden] { display: none; }
+  .sx-soon { background: #dcfce7; color: #166534; }
+  .sx-hot { background: #ffedd5; color: #c2410c; }
+  .sx-meter { height: 6px; max-width: 260px; margin-top: 0.15rem; background: #e2e8f0; border-radius: 999px; overflow: hidden; }
+  .sx-meter i { display: block; height: 100%; background: var(--accent); border-radius: 999px; transition: width 0.4s; }
+  .sx-meter.low i { background: #f59e0b; }
+  .sx-meter.full i { background: #dc2626; }
 
-  .dp-trigger:hover {
-    border-color: var(--brand, #4f46e5);
-  }
-
-  .dp-trigger svg {
-    color: var(--brand, #4f46e5);
-    flex: none;
-  }
-
-  .dp-chev {
-    color: var(--muted, #64748b);
-    font-size: 0.8rem;
-  }
-
-  .dp-panel {
-    position: absolute;
-    top: calc(100% + 8px);
-    left: 0;
-    z-index: 40;
-    width: 300px;
-    background: #fff;
-    border: 1px solid var(--line, #e2e8f0);
-    border-radius: 14px;
-    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
-    padding: 0.9rem;
-  }
-
-  .dp-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.6rem;
-  }
-
-  .dp-weekdays,
-  .dp-grid {
-    display: grid;
-    grid-template-columns: repeat(7, 1fr);
-    gap: 2px;
-    text-align: center;
-  }
-
-  .dp-weekdays span {
-    font-size: 0.72rem;
-    color: var(--muted, #64748b);
-    font-weight: 700;
-    padding: 0.3rem 0;
-  }
-
-  .dp-day {
-    position: relative;
-    aspect-ratio: 1;
-    border: 0;
-    background: transparent;
-    border-radius: 9px;
-    font: inherit;
-    font-size: 0.88rem;
-    cursor: pointer;
-    color: inherit;
-  }
-
-  .dp-day:hover:not(:disabled) {
-    background: var(--brand-soft, #eef2ff);
-  }
-
-  .dp-day:disabled {
-    color: #cbd5e1;
-    cursor: not-allowed;
-  }
-
-  .dp-day.is-today {
-    box-shadow: inset 0 0 0 1px var(--brand, #4f46e5);
-  }
-
-  .dp-day.is-selected {
-    background: var(--brand, #4f46e5);
-    color: #fff;
-  }
-
-  .dp-day.has-sessions::after {
-    content: "";
-    position: absolute;
-    bottom: 4px;
-    left: 50%;
-    width: 4px;
-    height: 4px;
-    margin-left: -2px;
-    border-radius: 50%;
-    background: var(--brand, #4f46e5);
-  }
-
-  .dp-day.is-selected.has-sessions::after {
-    background: #fff;
-  }
-
-  .dp-legend {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    font-size: 0.76rem;
-    color: var(--muted, #64748b);
-    margin-top: 0.6rem;
-  }
-
-  .dp-legend i {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--brand, #4f46e5);
-    display: inline-block;
-  }
-
-  .dp-pill {
-    display: inline-block;
-    font-size: 0.74rem;
-    font-weight: 700;
-    padding: 0.1rem 0.6rem;
-    border-radius: 999px;
-    background: var(--brand-soft, #eef2ff);
-    color: var(--brand-dark, #4338ca);
-    vertical-align: middle;
-    margin-left: 0.4rem;
-  }
-
-  .filters .chips {
-    margin-top: 0.2rem;
-  }
-
+  @keyframes sx-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .session.sx { animation: none; transition: none; } }
   @media (max-width: 640px) {
-    .dp-panel {
-      width: min(300px, 86vw);
-    }
+    .dp-panel { width: min(300px, 86vw); }
+    .session.sx { grid-template-columns: 52px 1fr; }
+    .session.sx > .btn { grid-column: 1 / -1; }
   }
 </style>
