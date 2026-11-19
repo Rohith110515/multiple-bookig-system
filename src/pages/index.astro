@@ -1,24 +1,170 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import { TENANTS } from '../lib/tenants.js';
+import { tarunam } from '../lib/tarunam.js';
 
 const user = Astro.locals.user;
-const studios = Object.values(TENANTS);
+const first = (user?.name ?? '').trim().split(/\s+/)[0] || 'there';
+
+const HEX = /^#[0-9a-fA-F]{6}$/;
+function fallbackColor(slug) {
+  let hash = 0;
+  for (const ch of slug) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+  return `hsl(${hash % 360} 62% 46%)`;
+}
+
+// Only safe, display-only fields are copied for the page. The signing secret never leaves the server.
+const tenants = Object.values(TENANTS);
+const studios = tenants.map((s) => ({
+  slug: s.slug,
+  name: s.name,
+  color: HEX.test(s.color ?? '') ? s.color : fallbackColor(s.slug),
+  classes: null,
+}));
+
+// Optional extra: how many classes each studio offers.
+// If a studio cannot be reached, the card simply shows no count.
+const results = await Promise.allSettled(tenants.map((s) => tarunam('GET', '/resources', { tenant: s })));
+results.forEach((r, i) => {
+  if (r.status === 'fulfilled' && r.value?.status === 200 && Array.isArray(r.value.data)) {
+    studios[i].classes = r.value.data.length;
+  }
+});
 ---
 <Layout title="Choose a studio">
-  <section class="page-head">
-    <h1>Choose a studio</h1>
-    <p class="muted">Welcome, {user?.name}. Select a studio to view its timetable and book a session.</p>
+  <section class="page-head home-head">
+    <p class="eyebrow">Welcome back</p>
+    <h1>Hi {first}, where to today?</h1>
+    <p class="muted">Choose a studio to see its timetable. Each studio keeps its own classes and bookings.</p>
   </section>
-  <ul class="sessions">
-    {studios.map((s) => (
-      <li class="session" style="grid-template-columns: 1fr auto;">
-        <div class="what">
-          <strong>{s.name}</strong>
-          <span class="seats">/{s.slug}</span>
-        </div>
-        <a class="btn btn-sm" href={`/${s.slug}`}>View schedule</a>
-      </li>
-    ))}
-  </ul>
+
+  {studios.length === 0 ? (
+    <p class="alert">No studios are set up yet. Add one in <code>src/lib/tenants.js</code>.</p>
+  ) : (
+    <ul class="studio-grid">
+      {studios.map((s, i) => (
+        <li>
+          <a class="studio-card" href={`/${s.slug}`} style={`--c:${s.color};--i:${i}`}>
+            <div class="cover" aria-hidden="true">
+              <span class="initial">{s.name.charAt(0).toUpperCase()}</span>
+            </div>
+            <div class="body">
+              <div class="text">
+                <strong>{s.name}</strong>
+                <span class="sub">/{s.slug}</span>
+                {s.classes != null && (
+                  <span class="info">{s.classes} {s.classes === 1 ? 'class' : 'classes'}</span>
+                )}
+              </div>
+              <span class="go">Open timetable →</span>
+            </div>
+          </a>
+        </li>
+      ))}
+    </ul>
+  )}
 </Layout>
+
+<style>
+  .home-head .eyebrow {
+    margin: 0 0 0.35rem;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    color: var(--brand-dark, #4338ca);
+  }
+
+  .studio-grid {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 1.1rem;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  }
+
+  .studio-card {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: #fff;
+    border: 1px solid var(--line, #e2e8f0);
+    border-radius: 20px;
+    overflow: hidden;
+    text-decoration: none;
+    color: inherit;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    transition: box-shadow 0.2s, transform 0.2s;
+    animation: rise 0.45s ease backwards;
+    animation-delay: calc(var(--i, 0) * 70ms);
+  }
+  .studio-card:hover {
+    box-shadow: 0 14px 32px rgba(15, 23, 42, 0.14);
+    transform: translateY(-4px);
+  }
+  .studio-card:focus-visible {
+    outline: 3px solid rgba(79, 70, 229, 0.45);
+    outline-offset: 3px;
+  }
+
+  .cover {
+    position: relative;
+    height: 116px;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    background: var(--c);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--c) 72%, #000), var(--c));
+  }
+  .cover::before,
+  .cover::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.13);
+  }
+  .cover::before { width: 160px; height: 160px; right: -44px; top: -70px; }
+  .cover::after  { width: 96px; height: 96px; left: -22px; bottom: -44px; }
+  .initial {
+    position: relative;
+    font-size: 3rem;
+    font-weight: 800;
+    color: #fff;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+  }
+
+  .body {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.2rem 1.2rem;
+    flex: 1;
+  }
+  .text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .text strong { font-size: 1.12rem; }
+  .sub { color: var(--muted, #64748b); font-size: 0.85rem; }
+  .info {
+    align-self: flex-start;
+    margin-top: 0.35rem;
+    font-size: 0.74rem;
+    font-weight: 700;
+    padding: 0.15rem 0.65rem;
+    border-radius: 999px;
+    background: #f1f5f9;
+    color: #334155;
+  }
+  .go { color: var(--c); font-weight: 700; font-size: 0.9rem; white-space: nowrap; }
+
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .studio-card { animation: none; transition: none; }
+  }
+  @media (max-width: 480px) {
+    .body { flex-direction: column; align-items: flex-start; }
+  }
+</style>
