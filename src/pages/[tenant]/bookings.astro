@@ -1,10 +1,12 @@
 ---
 import Layout from '../../layouts/Layout.astro';
-import { tarunam, friendlyError, formatTime, formatDay } from '../../lib/tarunam.js';
+import { tarunam, friendlyError, formatTime } from '../../lib/tarunam.js';
 
 const user = Astro.locals.user;
 const tenant = Astro.locals.tenant;
 if (!user) return Astro.redirect(`/login?next=${encodeURIComponent(`/${tenant.slug}/bookings`)}`);
+
+const tz = tenant.timeZone || 'Asia/Kolkata';
 
 let bookings = [];
 let error = '';
@@ -23,59 +25,139 @@ try {
 
 const now = Date.now();
 const upcoming = bookings.filter((b) => b.status === 'confirmed' && Date.parse(b.start_time) > now);
-const earlier = bookings.filter((b) => !upcoming.includes(b)).reverse();
+const earlier = bookings.filter((b) => !upcoming.includes(b)).reverse(); // newest first
+
+const stats = {
+  upcoming: upcoming.length,
+  attended: bookings.filter((b) => b.status === 'completed').length,
+  cancelled: bookings.filter((b) => b.status === 'cancelled').length,
+  noShow: bookings.filter((b) => b.status === 'no_show').length,
+};
+
 const LABELS = { confirmed: 'Confirmed', cancelled: 'Cancelled', completed: 'Attended', no_show: 'No-show' };
+
+// ---- Presentation helpers (same icons and colours as the sessions page) ----
+const ICONS = [
+  [/yoga|vinyasa|flow|stretch|mobility|meditat|sound bath/i, '🧘'],
+  [/pilates|barre/i, '🤸'],
+  [/hiit|cardio|circuit|bootcamp|conditioning/i, '🔥'],
+  [/spin|cycl|bike/i, '🚴'],
+  [/box|kick|mma|martial/i, '🥊'],
+  [/strength|weight|lift|power|crossfit|heavy/i, '🏋️'],
+  [/swim|aqua/i, '🏊'],
+  [/danc|zumba/i, '💃'],
+  [/run|treadmill/i, '🏃'],
+];
+function classLook(name) {
+  const text = String(name ?? '');
+  const match = ICONS.find(([pattern]) => pattern.test(text));
+  let hash = 0;
+  for (const ch of text) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+  return { icon: match ? match[1] : '✨', hue: hash % 360 };
+}
+
+// Month, day number and weekday of a session, in the studio's time zone
+const keyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz }); // YYYY-MM-DD
+const monthFmt = new Intl.DateTimeFormat('en-IN', { timeZone: 'UTC', month: 'short' });
+const weekdayFmt = new Intl.DateTimeFormat('en-IN', { timeZone: 'UTC', weekday: 'short' });
+function badgeOf(iso) {
+  const key = keyFmt.format(new Date(iso));
+  const date = new Date(`${key}T00:00:00Z`);
+  return { month: monthFmt.format(date), day: Number(key.slice(8)), weekday: weekdayFmt.format(date) };
+}
+
+const minutesBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 60000);
+
+function countdown(iso) {
+  const ms = Date.parse(iso) - Date.now();
+  if (ms <= 0) return '';
+  const hours = ms / 3600000;
+  if (hours < 1) return `in ${Math.max(1, Math.round(ms / 60000))} min`;
+  if (hours < 24) return `in ${Math.round(hours)} h`;
+  const days = Math.round(hours / 24);
+  return `in ${days} ${days === 1 ? 'day' : 'days'}`;
+}
 ---
 <Layout title="My bookings">
   <section class="page-head" data-tenant={tenant.slug}>
     <h1>My bookings</h1>
     <p class="muted">Signed in as {user.id} at {tenant.name}</p>
+    {!error && bookings.length > 0 && (
+      <div class="bk-stats">
+        <span class="bk-chip">{stats.upcoming} upcoming</span>
+        <span class="bk-chip">{stats.attended} attended</span>
+        <span class="bk-chip">{stats.cancelled} cancelled</span>
+        {stats.noShow > 0 && <span class="bk-chip">{stats.noShow} no-show</span>}
+      </div>
+    )}
   </section>
+
   {error && <p class="alert" role="alert">{error}</p>}
+
   {!error && bookings.length === 0 && (
-    <p class="empty">You have no bookings yet. <a class="link" href={`/${tenant.slug}`}>Browse sessions</a></p>
+    <div class="empty">
+      <p>You have no bookings at {tenant.name} yet.</p>
+      <p><a class="btn btn-sm" href={`/${tenant.slug}`}>Browse sessions</a></p>
+    </div>
   )}
+
   {upcoming.length > 0 && (
     <section class="day">
-      <h2>Upcoming</h2>
+      <h2>Upcoming <span class="bk-count">{upcoming.length}</span></h2>
       <ul class="bookings">
-        {upcoming.map((b) => (
-          <li class="booking">
-            <div class="when">{formatDay(b.start_time)}<br />{formatTime(b.start_time)} – {formatTime(b.end_time)}</div>
-            <div class="what">
-              <strong>{b.resource_name}</strong>
-              <span class="seats">{b.guests} {b.guests === 1 ? 'guest' : 'guests'}</span>
-            </div>
-            <div class="actions">
-              <span class="badge badge-confirmed">Confirmed</span>
-              <button class="btn btn-sm btn-ghost" type="button" data-cancel={b.id}>Cancel</button>
-            </div>
-            <p class="msg err" data-msg hidden></p>
-          </li>
-        ))}
+        {upcoming.map((b, i) => {
+          const look = classLook(b.resource_name);
+          const d = badgeOf(b.start_time);
+          return (
+            <li class="booking bk" style={`--hue:${look.hue};--i:${i}`}>
+              <div class="bk-badge"><small>{d.month}</small><b>{d.day}</b><span>{d.weekday}</span></div>
+              <div class="bk-main">
+                <strong><span aria-hidden="true">{look.icon}</span> {b.resource_name}</strong>
+                <span class="bk-meta">
+                  {formatTime(b.start_time)} – {formatTime(b.end_time)} · {minutesBetween(b.start_time, b.end_time)} min · {b.guests} {b.guests === 1 ? 'guest' : 'guests'}
+                </span>
+                {countdown(b.start_time) && <span class="bk-when">{countdown(b.start_time)}</span>}
+              </div>
+              <div class="actions">
+                <span class="badge badge-confirmed">Confirmed</span>
+                <button class="btn btn-sm btn-ghost" type="button" data-cancel={b.id}>Cancel</button>
+              </div>
+              <p class="msg err" data-msg hidden></p>
+            </li>
+          );
+        })}
       </ul>
     </section>
   )}
+
   {earlier.length > 0 && (
     <section class="day">
       <h2>Earlier and cancelled</h2>
       <ul class="bookings">
-        {earlier.map((b) => (
-          <li class="booking">
-            <div class="when">{formatDay(b.start_time)}<br />{formatTime(b.start_time)} – {formatTime(b.end_time)}</div>
-            <div class="what">
-              <strong>{b.resource_name}</strong>
-              <span class="seats">{b.guests} {b.guests === 1 ? 'guest' : 'guests'}</span>
-            </div>
-            <div class="actions">
-              <span class={`badge badge-${b.status}`}>{LABELS[b.status] ?? b.status}</span>
-            </div>
-          </li>
-        ))}
+        {earlier.map((b, i) => {
+          const look = classLook(b.resource_name);
+          const d = badgeOf(b.start_time);
+          return (
+            <li class="booking bk bk-past" style={`--hue:${look.hue};--i:${i}`}>
+              <div class="bk-badge"><small>{d.month}</small><b>{d.day}</b><span>{d.weekday}</span></div>
+              <div class="bk-main">
+                <strong><span aria-hidden="true">{look.icon}</span> {b.resource_name}</strong>
+                <span class="bk-meta">
+                  {formatTime(b.start_time)} – {formatTime(b.end_time)} · {b.guests} {b.guests === 1 ? 'guest' : 'guests'}
+                </span>
+              </div>
+              <div class="actions">
+                <span class={`badge badge-${b.status}`}>{LABELS[b.status] ?? b.status}</span>
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </section>
   )}
 </Layout>
+
+<!-- Cancel script: unchanged from your working version -->
 <script is:inline>
   const tenantSlug = document.querySelector('[data-tenant]')?.dataset.tenant;
   document.addEventListener('click', async (e) => {
@@ -101,3 +183,41 @@ const LABELS = { confirmed: 'Confirmed', cancelled: 'Cancelled', completed: 'Att
     button.disabled = false;
   });
 </script>
+
+<style is:global>
+  .bk-stats { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.9rem; }
+  .bk-chip { display: inline-block; font-size: 0.8rem; font-weight: 700; padding: 0.2rem 0.75rem; border-radius: 999px; background: var(--brand-soft, #eef2ff); color: var(--brand-dark, #4338ca); }
+  .bk-count { display: inline-block; font-size: 0.78rem; font-weight: 700; padding: 0.05rem 0.6rem; border-radius: 999px; background: var(--brand-soft, #eef2ff); color: var(--brand-dark, #4338ca); vertical-align: middle; margin-left: 0.3rem; }
+
+  .booking.bk {
+    --accent: hsl(var(--hue) 70% 50%);
+    --tint: hsl(var(--hue) 85% 95%);
+    display: grid;
+    grid-template-columns: 76px 1fr auto;
+    gap: 0.5rem 1.1rem;
+    align-items: center;
+    padding: 0.9rem 1.2rem 0.9rem 0.9rem;
+    border-radius: 16px;
+    animation: bk-rise 0.4s ease backwards;
+    animation-delay: calc(var(--i, 0) * 55ms);
+  }
+  .booking.bk.bk-past { opacity: 0.82; }
+  .booking.bk .msg { grid-column: 1 / -1; }
+
+  .bk-badge { display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--tint); border-radius: 14px; padding: 0.55rem 0.3rem; text-align: center; }
+  .bk-badge small { font-size: 0.7rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+  .bk-badge b { font-size: 1.6rem; line-height: 1.1; }
+  .bk-badge span { font-size: 0.72rem; color: var(--muted, #64748b); }
+
+  .bk-main { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+  .bk-main strong { font-size: 1.04rem; }
+  .bk-meta { color: var(--muted, #64748b); font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+  .bk-when { align-self: flex-start; font-size: 0.75rem; font-weight: 700; padding: 0.12rem 0.65rem; border-radius: 999px; background: #dcfce7; color: #166534; margin-top: 0.1rem; }
+
+  @keyframes bk-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .booking.bk { animation: none; } }
+  @media (max-width: 640px) {
+    .booking.bk { grid-template-columns: 70px 1fr; }
+    .booking.bk .actions { grid-column: 1 / -1; }
+  }
+</style>
