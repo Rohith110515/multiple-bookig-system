@@ -1,16 +1,38 @@
 ---
 import { SESSION_COOKIE, encodeSession, safeNext } from '../lib/session.js';
-
-const next = safeNext(Astro.url.searchParams.get('next'));
-if (Astro.locals.user) return Astro.redirect(next); // already signed in
+import { TENANTS } from '../lib/tenants.js';
+import {
+  staffConfigured,
+  passcodeVarName,
+  passcodeMatches,
+  makeStaffToken,
+  staffCookieName,
+  throttled,
+  recordFailure,
+  clearFailures,
+} from '../lib/staff.js';
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Which form is showing: ?as=staff on a visit, or the hidden "mode" field on a submit
+let mode = Astro.url.searchParams.get('as') === 'staff' ? 'staff' : 'customer';
+let form = null;
+if (Astro.request.method === 'POST') {
+  form = await Astro.request.formData();
+  mode = form.get('mode') === 'staff' ? 'staff' : 'customer';
+}
+
+const next = safeNext(Astro.url.searchParams.get('next'));
+// A signed-in customer has nothing to do here. Staff mode stays open so they can switch to it.
+if (Astro.locals.user && mode === 'customer') return Astro.redirect(next);
+
 let error = '';
 let name = '';
 let email = '';
+let studio = '';
 
-if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+/* ---------- Customer sign-in (demo: nothing is verified) ---------- */
+if (form && mode === 'customer') {
   name = String(form.get('name') ?? '').trim();
   email = String(form.get('email') ?? '').trim().toLowerCase();
   const destination = safeNext(String(form.get('next') ?? ''));
@@ -31,6 +53,55 @@ if (Astro.request.method === 'POST') {
     return Astro.redirect(destination);
   }
 }
+
+/* ---------- Studio staff sign-in (studio passcode) ---------- */
+if (form && mode === 'staff') {
+  studio = String(form.get('studio') ?? '');
+  name = String(form.get('name') ?? '').trim();
+  const passcode = String(form.get('passcode') ?? '');
+
+  let ip = 'unknown';
+  try { ip = Astro.clientAddress; } catch { /* not available */ }
+  const key = `${studio}|${ip}`;
+  const known = Object.hasOwn(TENANTS, studio) && staffConfigured(studio);
+
+  // One generic message for "unknown studio" and "wrong passcode", so neither is revealed
+  if (!known) {
+    error = 'That studio or passcode is not correct.';
+  } else if (name.length < 1 || name.length > 60) {
+    error = 'Please enter your name (up to 60 characters).';
+  } else if (throttled(key)) {
+    error = 'Too many attempts. Please wait a few minutes and try again.';
+  } else if (!passcodeMatches(studio, passcode)) {
+    recordFailure(key);
+    error = 'That studio or passcode is not correct.';
+  } else {
+    clearFailures(key);
+    const tidy = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'staff';
+
+    // The staff cookie unlocks THIS studio's dashboard only
+    Astro.cookies.set(staffCookieName(studio), makeStaffToken(studio), {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: import.meta.env.PROD,
+      maxAge: 8 * 3600,
+    });
+    // A matching session, so the rest of the site knows who is signed in (and the log shows a name)
+    Astro.cookies.set(SESSION_COOKIE, encodeSession({ id: `staff:${studio}:${tidy}`, name }), {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: import.meta.env.PROD,
+      maxAge: 8 * 3600,
+    });
+    return Astro.redirect(`/${studio}/staff`);
+  }
+}
+
+const studios = Object.values(TENANTS).filter((t) => staffConfigured(t.slug));
+const nextQuery = Astro.url.searchParams.get('next') ? `?next=${encodeURIComponent(next)}` : '';
+const firstSlug = Object.keys(TENANTS)[0] ?? 'your-studio';
 ---
 <!doctype html>
 <html lang="en">
@@ -56,28 +127,81 @@ if (Astro.request.method === 'POST') {
 
       <main class="main">
         <div class="card">
-          <h1>Welcome</h1>
-          <p class="muted">Sign in to browse studios and book sessions.</p>
+          <div class="tabs" role="tablist" aria-label="Sign-in type">
+            <a class:list={['tab', { active: mode === 'customer' }]} href={`/login${nextQuery}`} role="tab" aria-selected={mode === 'customer'}>Customer</a>
+            <a class:list={['tab', { active: mode === 'staff' }]} href="/login?as=staff" role="tab" aria-selected={mode === 'staff'}>Studio staff</a>
+          </div>
 
-          <p class="demo" role="note">
-            <strong>Demo mode.</strong> Any name and email will work. Nothing is verified and there is no password.
-          </p>
+          {mode === 'customer' ? (
+            <>
+              <h1>Welcome</h1>
+              <p class="muted">Sign in to browse studios and book sessions.</p>
 
-          {error && <p class="alert" role="alert">{error}</p>}
+              <p class="demo" role="note">
+                <strong>Demo mode.</strong> Any name and email will work. Nothing is verified and there is no password.
+              </p>
 
-          <form method="post" action="/login">
-            <input type="hidden" name="next" value={next} />
-            <div class="field">
-              <label for="name">Full name</label>
-              <input id="name" name="name" required maxlength="60" autocomplete="name" value={name} placeholder="Rohit Kumar" />
-            </div>
-            <div class="field">
-              <label for="email">Email</label>
-              <input id="email" name="email" type="email" required maxlength="200" autocomplete="email" value={email} placeholder="you@example.com" />
-            </div>
-            <button class="btn" type="submit">Continue</button>
-            <button class="btn ghost" type="button" id="demo-fill">Use a demo account</button>
-          </form>
+              {error && <p class="alert" role="alert">{error}</p>}
+
+              <form method="post" action="/login">
+                <input type="hidden" name="mode" value="customer" />
+                <input type="hidden" name="next" value={next} />
+                <div class="field">
+                  <label for="name">Full name</label>
+                  <input id="name" name="name" required maxlength="60" autocomplete="name" value={name} placeholder="Rohit Kumar" />
+                </div>
+                <div class="field">
+                  <label for="email">Email</label>
+                  <input id="email" name="email" type="email" required maxlength="200" autocomplete="email" value={email} placeholder="you@example.com" />
+                </div>
+                <button class="btn" type="submit">Continue</button>
+                <button class="btn ghost" type="button" id="demo-fill">Use a demo account</button>
+              </form>
+            </>
+          ) : (
+            <>
+              <h1>Studio staff</h1>
+              <p class="muted">Sign in to manage rosters, attendance and sessions.</p>
+
+              {studios.length === 0 ? (
+                <>
+                  <p class="demo" role="note">Staff access is not set up yet.</p>
+                  {import.meta.env.DEV && (
+                    <p class="devnote">Developer note: add <code>{passcodeVarName(firstSlug)}</code> (at least 8 characters) to <code>.env</code>, then restart the dev server.</p>
+                  )}
+                </>
+              ) : (
+                <>
+                  <p class="demo" role="note">Use the staff passcode your studio gave you. It is separate from customer sign-in.</p>
+
+                  {error && <p class="alert" role="alert">{error}</p>}
+
+                  <form method="post" action="/login?as=staff">
+                    <input type="hidden" name="mode" value="staff" />
+                    <div class="field">
+                      <label for="studio">Studio</label>
+                      <select id="studio" name="studio" required>
+                        <option value="" disabled selected={studio === ''}>Choose your studio</option>
+                        {studios.map((t) => (
+                          <option value={t.slug} selected={t.slug === studio}>{t.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="staff-name">Your name</label>
+                      <input id="staff-name" name="name" required maxlength="60" autocomplete="name" value={name} placeholder="Asha" />
+                      <span class="hint">Shown in the studio's activity log next to what you do.</span>
+                    </div>
+                    <div class="field">
+                      <label for="passcode">Staff passcode</label>
+                      <input id="passcode" name="passcode" type="password" required autocomplete="off" />
+                    </div>
+                    <button class="btn" type="submit">Open staff area</button>
+                  </form>
+                </>
+              )}
+            </>
+          )}
         </div>
       </main>
     </div>
@@ -105,14 +229,23 @@ if (Astro.request.method === 'POST') {
   .foot { font-size: 0.82rem; color: rgba(255, 255, 255, 0.7); margin: 0; }
   .main { display: grid; place-items: center; padding: 2rem; background: #fff; }
   .card { width: min(400px, 100%); }
+
+  .tabs { display: inline-flex; gap: 0.25rem; padding: 0.25rem; background: #f1f5f9; border-radius: 12px; margin-bottom: 1.5rem; }
+  .tab { padding: 0.45rem 1rem; border-radius: 9px; font-size: 0.88rem; font-weight: 700; color: #64748b; text-decoration: none; transition: background 0.15s, color 0.15s; }
+  .tab:hover { color: #0f172a; }
+  .tab.active { background: #fff; color: #0f172a; box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12); }
+  .tab:focus-visible { outline: 3px solid rgba(79, 70, 229, 0.4); outline-offset: 1px; }
+
   h1 { margin: 0 0 0.35rem; font-size: 2rem; letter-spacing: -0.02em; }
   .muted { color: #64748b; margin: 0; }
   .demo { background: #fef3c7; color: #b45309; border-radius: 10px; padding: 0.65rem 0.9rem; font-size: 0.88rem; margin: 1.1rem 0; }
   .alert { background: #fee2e2; color: #991b1b; border-radius: 10px; padding: 0.7rem 0.9rem; margin: 0 0 1rem; font-size: 0.92rem; }
+  .devnote { background: #f1f5f9; color: #334155; border-radius: 10px; padding: 0.65rem 0.9rem; font-size: 0.84rem; }
   .field { display: grid; gap: 0.35rem; margin-bottom: 1rem; }
   label { font-weight: 600; font-size: 0.9rem; }
-  input { width: 100%; padding: 0.75rem 0.9rem; border: 1px solid #cbd5e1; border-radius: 10px; font: inherit; }
-  input:focus-visible { outline: 3px solid rgba(79, 70, 229, 0.4); outline-offset: 1px; border-color: #4f46e5; }
+  .hint { font-size: 0.78rem; color: #64748b; }
+  input, select { width: 100%; padding: 0.75rem 0.9rem; border: 1px solid #cbd5e1; border-radius: 10px; font: inherit; background: #fff; color: inherit; }
+  input:focus-visible, select:focus-visible { outline: 3px solid rgba(79, 70, 229, 0.4); outline-offset: 1px; border-color: #4f46e5; }
   .btn { width: 100%; padding: 0.75rem 1.2rem; border: 0; border-radius: 10px; background: #4f46e5; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
   .btn:hover { background: #4338ca; }
   .btn.ghost { background: #fff; color: #0f172a; border: 1px solid #cbd5e1; margin-top: 0.6rem; }
