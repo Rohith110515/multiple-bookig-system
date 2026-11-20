@@ -1701,4 +1701,13 @@ if (settings?.min_cancel_notice_minutes) rules.push(`Cancel up to ${settings.min
       transition-duration: 0.01ms !important;
     }
   }
+    /* Week strip: no default scrollbar, soft fade at both edges */
+  .week {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    padding-inline: 1.4rem;
+    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 1.4rem, #000 calc(100% - 1.4rem), transparent 100%);
+    mask-image: linear-gradient(90deg, transparent 0, #000 1.4rem, #000 calc(100% - 1.4rem), transparent 100%);
+  }
+  .week::-webkit-scrollbar { display: none; }
 </style>

@@ -1,0 +1,461 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import { tarunam, formatTime } from '../../../lib/tarunam.js';
+import {
+  isStaff, staffConfigured, staffCookieName, passcodeVarName,
+  passcodeMatches, makeStaffToken, throttled, recordFailure, clearFailures, zonedToUtcIso,
+} from '../../../lib/staff.js';
+
+const tenant = Astro.locals.tenant;
+const slug = tenant.slug;
+const tz = tenant.timeZone || 'Asia/Kolkata';
+const base = `/${slug}`;
+
+const configured = staffConfigured(slug);
+const unlocked = isStaff(Astro.cookies, slug);
+let gateError = '';
+
+// ---- Unlock (wrong guesses are throttled) and lock ----
+let ip = 'unknown';
+try { ip = Astro.clientAddress; } catch { /* not available */ }
+const throttleKey = `${slug}|${ip}`;
+
+if (Astro.request.method === 'POST' && configured) {
+  const form = await Astro.request.formData();
+  const action = String(form.get('action') ?? '');
+
+  if (!unlocked && action === 'unlock') {
+    if (throttled(throttleKey)) {
+      gateError = 'Too many attempts. Please wait a few minutes and try again.';
+    } else if (passcodeMatches(slug, String(form.get('passcode') ?? ''))) {
+      clearFailures(throttleKey);
+      Astro.cookies.set(staffCookieName(slug), makeStaffToken(slug), {
+        path: '/',
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: import.meta.env.PROD,
+        maxAge: 8 * 3600,
+      });
+      return Astro.redirect(`${base}/staff`);
+    } else {
+      recordFailure(throttleKey);
+      gateError = 'That passcode is not correct.';
+    }
+  }
+
+  if (unlocked && action === 'lock') {
+    Astro.cookies.delete(staffCookieName(slug), { path: '/' });
+    return Astro.redirect(`${base}/staff`);
+  }
+}
+
+// ---- Dashboard data (only loaded for unlocked staff) ----
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const keyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz });
+const addDays = (key, n) => {
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+};
+const todayKey = keyFmt.format(new Date());
+const requested = Astro.url.searchParams.get('date') ?? '';
+const date = DATE.test(requested) && !Number.isNaN(Date.parse(`${requested}T00:00:00Z`)) ? requested : todayKey;
+const dateLabel = new Intl.DateTimeFormat('en-IN', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+  .format(new Date(`${date}T00:00:00Z`));
+
+let sessions = [];
+let resources = [];
+let error = '';
+
+if (unlocked) {
+  try {
+    const from = zonedToUtcIso(date, '00:00', tz);
+    const to = zonedToUtcIso(addDays(date, 1), '00:00', tz);
+    const [s, r] = await Promise.all([
+      tarunam('GET', '/schedules', { tenant, query: { from, to, include_cancelled: 'true', limit: 200 } }),
+      tarunam('GET', '/resources', { tenant }),
+    ]);
+    if (s.status === 200) sessions = s.data;
+    else error = 'Could not load the sessions for this day.';
+    if (r.status === 200) resources = r.data;
+  } catch (err) {
+    console.error('[staff] could not reach the booking service:', err.message);
+    error = 'The booking service is unavailable right now. Please try again in a moment.';
+  }
+}
+
+const nowMs = Date.now();
+const openSessions = sessions.filter((s) => s.status === 'open');
+const seatsBooked = openSessions.reduce((n, s) => n + s.seats_booked, 0);
+const seatsTotal = openSessions.reduce((n, s) => n + s.capacity, 0);
+const calledOff = sessions.length - openSessions.length;
+
+function stateOf(s) {
+  if (s.status === 'cancelled') return { key: 'off', label: 'Called off' };
+  if (Date.parse(s.end_time) <= nowMs) return { key: 'done', label: 'Finished' };
+  if (Date.parse(s.start_time) <= nowMs) return { key: 'live', label: 'In progress' };
+  return { key: 'next', label: 'Upcoming' };
+}
+---
+<Layout title="Staff">
+  {!configured && (
+    <section class="st-gate">
+      <h1>Staff area</h1>
+      <p class="muted">Staff access is not set up for {tenant.name}.</p>
+      {import.meta.env.DEV && (
+        <p class="note">Developer note: add <code>{passcodeVarName(slug)}</code> (at least 8 characters) to <code>.env</code>, then restart the dev server.</p>
+      )}
+    </section>
+  )}
+
+  {configured && !unlocked && (
+    <section class="st-gate">
+      <p class="section-kicker">STAFF ONLY</p>
+      <h1>Staff area</h1>
+      <p class="muted">Enter the staff passcode for {tenant.name}.</p>
+      {gateError && <p class="alert" role="alert">{gateError}</p>}
+      <form method="post" action={`${base}/staff`} class="st-gate-form">
+        <input type="hidden" name="action" value="unlock" />
+        <label for="passcode">Passcode</label>
+        <input class="input" id="passcode" name="passcode" type="password" autocomplete="off" required />
+        <button class="btn" type="submit">Unlock</button>
+      </form>
+    </section>
+  )}
+
+  {configured && unlocked && (
+    <div id="staff-root" data-slug={slug} data-base={base}>
+      <section class="st-head">
+        <div>
+          <p class="section-kicker">STAFF DASHBOARD</p>
+          <h1>{tenant.name}</h1>
+          <p class="muted">Rosters, attendance and the schedule, live from the booking service.</p>
+        </div>
+        <form method="post" action={`${base}/staff`}>
+          <input type="hidden" name="action" value="lock" />
+          <button class="btn btn-ghost btn-sm" type="submit">🔒 Lock staff area</button>
+        </form>
+      </section>
+
+      <div class="st-stats">
+        <div class="st-stat"><b>{openSessions.length}</b><span>{openSessions.length === 1 ? 'session' : 'sessions'}</span></div>
+        <div class="st-stat"><b>{seatsBooked}<small>/{seatsTotal}</small></b><span>seats booked</span></div>
+        <div class="st-stat"><b>{calledOff}</b><span>called off</span></div>
+      </div>
+
+      <div class="st-daybar">
+        <a class="dp-nav" href={`${base}/staff?date=${addDays(date, -1)}`} aria-label="Previous day">‹</a>
+        <strong>{dateLabel}</strong>
+        <a class="dp-nav" href={`${base}/staff?date=${addDays(date, 1)}`} aria-label="Next day">›</a>
+        {date !== todayKey && <a class="btn btn-sm btn-ghost" href={`${base}/staff`}>Today</a>}
+        <label class="st-jump">
+          <span class="muted">Jump to</span>
+          <input class="input" type="date" id="st-jump" value={date} />
+        </label>
+      </div>
+
+      {error && <p class="alert" role="alert">{error}</p>}
+
+      {!error && sessions.length === 0 && (
+        <div class="empty">
+          <div class="empty-icon">🗓️</div>
+          <h2>No sessions on this day</h2>
+          <p>Add one below.</p>
+        </div>
+      )}
+
+      <ul class="st-list">
+        {sessions.map((s) => {
+          const state = stateOf(s);
+          const pct = Math.round((s.seats_booked / s.capacity) * 100);
+          const canCallOff = s.status === 'open' && Date.parse(s.end_time) > nowMs;
+          return (
+            <li class:list={['st-card', `st-${state.key}`]} data-id={s.id} data-start={s.start_time}>
+              <div class="st-time"><b>{formatTime(s.start_time)}</b><span>to {formatTime(s.end_time)}</span></div>
+              <div class="st-main">
+                <strong>{s.resource_name}</strong>
+                <span class="st-sub">{s.seats_booked} of {s.capacity} seats booked · <span class={`st-state st-state-${state.key}`}>{state.label}</span></span>
+                <div class="st-meter"><i style={`width:${pct}%`}></i></div>
+              </div>
+              <div class="st-actions">
+                {s.status === 'open' && <button class="btn btn-sm btn-ghost" type="button" data-roster>Roster</button>}
+                {canCallOff && <button class="btn btn-sm btn-ghost st-danger" type="button" data-calloff>Call off</button>}
+              </div>
+              <div class="st-panel" data-panel hidden></div>
+            </li>
+          );
+        })}
+      </ul>
+
+      <details class="st-create">
+        <summary>＋ Add a session</summary>
+        <form id="st-create" class="st-form">
+          <label>Class
+            <select class="input" name="resource_id" required>
+              {resources.map((r) => <option value={r.id}>{r.name}</option>)}
+            </select>
+          </label>
+          <label>Date
+            <input class="input" type="date" name="date" value={date} required />
+          </label>
+          <label>Start time ({tz})
+            <input class="input" type="time" name="time" value="09:00" required />
+          </label>
+          <label>Length (minutes)
+            <input class="input" type="number" name="minutes" value="60" min="5" max="480" required />
+          </label>
+          <label>Capacity
+            <input class="input" type="number" name="capacity" value="10" min="1" max="200" required />
+          </label>
+          <div class="st-form-actions">
+            <button class="btn" type="submit">Create session</button>
+            <span id="st-create-msg" class="msg" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+      </details>
+    </div>
+  )}
+</Layout>
+
+<script is:inline>
+  (function () {
+    var root = document.getElementById('staff-root');
+    if (!root) return;
+
+    var slug = root.dataset.slug;
+    var base = root.dataset.base;
+    var api = '/api/' + slug + '/staff/';
+    var LABEL = { confirmed: 'Confirmed', completed: 'Checked in', no_show: 'No-show', cancelled: 'Cancelled' };
+
+    function call(method, path, body) {
+      return fetch(api + path, {
+        method: method,
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      }).then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          return { ok: res.ok, data: data };
+        });
+      });
+    }
+
+    // Jump to a chosen date
+    var jump = document.getElementById('st-jump');
+    if (jump) jump.addEventListener('change', function () {
+      if (jump.value) location.href = base + '/staff?date=' + encodeURIComponent(jump.value);
+    });
+
+    // ----- Roster -----
+    function renderRoster(panel, bookings, startMs) {
+      panel.textContent = ''; // everything below uses textContent, so a booking name can never inject HTML
+      if (!bookings.length) {
+        var none = document.createElement('p');
+        none.className = 'st-none';
+        none.textContent = 'No bookings yet.';
+        panel.append(none);
+        return;
+      }
+      var openFrom = startMs - 60 * 60000;
+      var list = document.createElement('ul');
+      list.className = 'st-rows';
+
+      bookings.forEach(function (b) {
+        var row = document.createElement('li');
+        row.className = 'st-row';
+
+        var who = document.createElement('div');
+        who.className = 'st-who';
+        var name = document.createElement('strong');
+        name.textContent = b.user_id;
+        var meta = document.createElement('span');
+        meta.textContent = b.guests + (b.guests === 1 ? ' guest' : ' guests');
+        who.append(name, meta);
+
+        var badge = document.createElement('span');
+        badge.className = 'st-badge st-b-' + b.status;
+        badge.textContent = LABEL[b.status] || b.status;
+
+        var note = document.createElement('p');
+        note.className = 'msg err st-rownote';
+
+        row.append(who, badge);
+
+        if (b.status !== 'cancelled') {
+          var actions = document.createElement('div');
+          actions.className = 'st-rowactions';
+          [['check-in', 'Check in'], ['no-show', 'No-show']].forEach(function (pair) {
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm btn-ghost';
+            btn.textContent = pair[1];
+            if (Date.now() < openFrom) {
+              btn.disabled = true;
+              btn.title = 'Opens 60 minutes before the session starts';
+            }
+            btn.addEventListener('click', function () {
+              btn.disabled = true;
+              note.textContent = '';
+              call('POST', 'attendance', { booking_id: b.id, action: pair[0] }).then(function (r) {
+                if (r.ok) {
+                  badge.className = 'st-badge st-b-' + r.data.status;
+                  badge.textContent = LABEL[r.data.status] || r.data.status;
+                } else {
+                  note.textContent = r.data.message || 'Could not update this booking.';
+                }
+                btn.disabled = false;
+              }).catch(function () {
+                note.textContent = 'Network problem. Please try again.';
+                btn.disabled = false;
+              });
+            });
+            actions.append(btn);
+          });
+          row.append(actions);
+        }
+        row.append(note);
+        list.append(row);
+      });
+      panel.append(list);
+    }
+
+    document.addEventListener('click', function (e) {
+      var button = e.target.closest('[data-roster]');
+      if (!button) return;
+      var card = button.closest('.st-card');
+      var panel = card.querySelector('[data-panel]');
+      if (!panel.hidden) { panel.hidden = true; return; }
+      panel.hidden = false;
+      panel.textContent = 'Loading roster…';
+      call('GET', 'roster?schedule=' + encodeURIComponent(card.dataset.id)).then(function (r) {
+        if (r.ok) renderRoster(panel, r.data.bookings, Date.parse(card.dataset.start));
+        else panel.textContent = r.data.message || 'Could not load the roster.';
+      }).catch(function () {
+        panel.textContent = 'Network problem. Please try again.';
+      });
+    });
+
+    // ----- Call off a session -----
+    document.addEventListener('click', function (e) {
+      var button = e.target.closest('[data-calloff]');
+      if (!button) return;
+      var card = button.closest('.st-card');
+      var name = card.querySelector('.st-main strong').textContent;
+      if (!window.confirm('Call off "' + name + '"? Every confirmed booking on it will be cancelled.')) return;
+      button.disabled = true;
+      call('POST', 'session-cancel', { schedule_id: card.dataset.id }).then(function (r) {
+        if (r.ok) {
+          if (window.toast) window.toast('Session called off. ' + r.data.bookings_cancelled + ' booking(s) cancelled.', 'ok');
+          location.reload();
+        } else {
+          window.alert(r.data.message || 'Could not call off this session.');
+          button.disabled = false;
+        }
+      }).catch(function () {
+        window.alert('Network problem. Please try again.');
+        button.disabled = false;
+      });
+    });
+
+    // ----- Add a session -----
+    var form = document.getElementById('st-create');
+    if (form) form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var out = document.getElementById('st-create-msg');
+      var submit = form.querySelector('button[type=submit]');
+      out.textContent = '';
+      out.className = 'msg';
+      submit.disabled = true;
+      call('POST', 'session-create', {
+        resource_id: form.elements['resource_id'].value,
+        date: form.elements['date'].value,
+        time: form.elements['time'].value,
+        minutes: Number(form.elements['minutes'].value),
+        capacity: Number(form.elements['capacity'].value),
+      }).then(function (r) {
+        if (r.ok) {
+          location.href = base + '/staff?date=' + encodeURIComponent(form.elements['date'].value);
+        } else {
+          out.textContent = r.data.message || 'Could not create the session.';
+          out.className = 'msg err';
+          submit.disabled = false;
+        }
+      }).catch(function () {
+        out.textContent = 'Network problem. Please try again.';
+        out.className = 'msg err';
+        submit.disabled = false;
+      });
+    });
+  })();
+</script>
+
+<style is:global>
+  .st-gate { max-width: 420px; margin: 3rem auto; padding: 2rem; background: #fff; border: 1px solid var(--line, #e2e8f0); border-radius: 22px; box-shadow: 0 18px 45px rgba(15, 23, 42, 0.1); }
+  .st-gate h1 { margin: 0 0 0.4rem; }
+  .st-gate-form { display: grid; gap: 0.6rem; margin-top: 1rem; }
+  .st-gate-form label { font-weight: 650; font-size: 0.9rem; }
+  .section-kicker { margin: 0 0 0.35rem; color: var(--brand-dark, #4338ca); font-size: 0.72rem; font-weight: 800; letter-spacing: 0.12em; }
+
+  .st-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; padding: 2rem 0 1rem; }
+  .st-head h1 { margin: 0 0 0.3rem; }
+  .st-head form { margin: 0; }
+
+  .st-stats { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
+  .st-stat { min-width: 130px; padding: 0.8rem 1.1rem; background: #fff; border: 1px solid var(--line, #e2e8f0); border-radius: 16px; box-shadow: 0 3px 12px rgba(15, 23, 42, 0.035); }
+  .st-stat b { display: block; font-size: 1.6rem; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .st-stat b small { font-size: 0.95rem; color: var(--muted, #64748b); font-weight: 600; }
+  .st-stat span { font-size: 0.8rem; color: var(--muted, #64748b); }
+
+  .st-daybar { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 1.1rem; }
+  .st-daybar > strong { font-size: 1.05rem; min-width: 200px; text-align: center; }
+  .st-jump { display: inline-flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+  .st-jump .input { width: auto; padding: 0.45rem 0.7rem; }
+
+  .st-list { list-style: none; margin: 0 0 1.6rem; padding: 0; display: grid; gap: 0.8rem; }
+  .st-card { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 0.6rem 1.1rem; align-items: center; padding: 1.05rem 1.2rem; background: #fff; border: 1px solid var(--line, #e2e8f0); border-left: 4px solid var(--brand, #4f46e5); border-radius: 18px; box-shadow: 0 3px 12px rgba(15, 23, 42, 0.035); }
+  .st-card.st-off { border-left-color: #94a3b8; opacity: 0.7; }
+  .st-card.st-done { border-left-color: #cbd5e1; }
+  .st-card.st-live { border-left-color: #22c55e; }
+  .st-time b { display: block; font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+  .st-time span { font-size: 0.82rem; color: var(--muted, #64748b); }
+  .st-main { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+  .st-main strong { font-size: 1.04rem; }
+  .st-sub { font-size: 0.86rem; color: var(--muted, #64748b); }
+  .st-state { font-weight: 700; }
+  .st-state-next { color: var(--brand-dark, #4338ca); }
+  .st-state-live { color: #15803d; }
+  .st-state-off { color: #b91c1c; }
+  .st-meter { height: 6px; max-width: 260px; background: #edf0f5; border-radius: 999px; overflow: hidden; }
+  .st-meter i { display: block; height: 100%; background: var(--brand, #4f46e5); border-radius: 999px; }
+  .st-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .st-danger { color: #b91c1c; }
+  .st-danger:hover:not(:disabled) { background: #fee2e2 !important; color: #991b1b !important; border-color: #fecaca !important; }
+
+  .st-panel { grid-column: 1 / -1; padding-top: 0.6rem; border-top: 1px dashed var(--line, #e2e8f0); font-size: 0.92rem; color: var(--muted, #64748b); }
+  .st-none { margin: 0; }
+  .st-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+  .st-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 0.4rem 0.8rem; align-items: center; padding: 0.6rem 0.8rem; background: var(--bg, #f5f7fc); border-radius: 12px; color: var(--ink, #111827); }
+  .st-who { display: flex; flex-direction: column; min-width: 0; }
+  .st-who strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.93rem; }
+  .st-who span { font-size: 0.8rem; color: var(--muted, #64748b); }
+  .st-badge { padding: 0.2rem 0.65rem; border-radius: 999px; font-size: 0.76rem; font-weight: 750; white-space: nowrap; }
+  .st-b-confirmed { background: #dcfce7; color: #166534; }
+  .st-b-completed { background: var(--brand-soft, #eef2ff); color: var(--brand-dark, #4338ca); }
+  .st-b-no_show { background: #fef3c7; color: #92400e; }
+  .st-b-cancelled { background: #fee2e2; color: #991b1b; }
+  .st-rowactions { display: flex; gap: 0.4rem; }
+  .st-rownote { grid-column: 1 / -1; margin: 0; }
+  .st-rownote:empty { display: none; }
+
+  .st-create { background: #fff; border: 1px solid var(--line, #e2e8f0); border-radius: 18px; padding: 0.4rem 1.2rem; }
+  .st-create summary { cursor: pointer; font-weight: 750; padding: 0.8rem 0; list-style: none; }
+  .st-create summary::-webkit-details-marker { display: none; }
+  .st-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.9rem; padding: 0.4rem 0 1.2rem; }
+  .st-form label { display: grid; gap: 0.35rem; font-weight: 650; font-size: 0.86rem; color: #334155; }
+  .st-form-actions { display: flex; align-items: center; gap: 0.9rem; grid-column: 1 / -1; flex-wrap: wrap; }
+
+  @media (max-width: 700px) {
+    .st-card { grid-template-columns: 1fr; }
+    .st-row { grid-template-columns: 1fr auto; }
+    .st-rowactions { grid-column: 1 / -1; }
+    .st-jump { margin-left: 0; }
+  }
+</style>
