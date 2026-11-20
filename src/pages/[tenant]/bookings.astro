@@ -1,5 +1,6 @@
 ---
 import Layout from '../../layouts/Layout.astro';
+import QRCode from 'qrcode';
 import { tarunam, friendlyError, formatTime } from '../../lib/tarunam.js';
 
 const user = Astro.locals.user;
@@ -7,6 +8,7 @@ const tenant = Astro.locals.tenant;
 if (!user) return Astro.redirect(`/login?next=${encodeURIComponent(`/${tenant.slug}/bookings`)}`);
 
 const tz = tenant.timeZone || 'Asia/Kolkata';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 let bookings = [];
 let error = '';
@@ -35,6 +37,27 @@ const stats = {
 };
 
 const LABELS = { confirmed: 'Confirmed', cancelled: 'Cancelled', completed: 'Attended', no_show: 'No-show' };
+
+// ---- Tickets: one QR code (SVG) per upcoming booking, built on the server ----
+// The code holds only the studio and the booking reference. Nothing personal goes into it.
+const qr = {};
+await Promise.all(
+  upcoming.map(async (b) => {
+    if (!UUID.test(b.id)) return;
+    try {
+      qr[b.id] = await QRCode.toString(`tarunam:${tenant.slug}:${b.id}`, {
+        type: 'svg',
+        margin: 1,
+        errorCorrectionLevel: 'M',
+        color: { dark: '#0f172a', light: '#ffffff' },
+      });
+    } catch (err) {
+      console.error('[ui] could not build a QR code:', err.message);
+    }
+  }),
+);
+const ticketCode = (id) => String(id).slice(0, 8).toUpperCase();
+const dayLongFmt = new Intl.DateTimeFormat('en-IN', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' });
 
 // ---- Presentation helpers (same icons and colours as the sessions page) ----
 const ICONS = [
@@ -79,15 +102,20 @@ function countdown(iso) {
 }
 ---
 <Layout title="My bookings">
-  <section class="page-head" data-tenant={tenant.slug}>
+  <section class="page-head" data-tenant={tenant.slug} data-studio={tenant.name}>
     <h1>My bookings</h1>
     <p class="muted">Signed in as {user.id} at {tenant.name}</p>
     {!error && bookings.length > 0 && (
-      <div class="bk-stats">
-        <span class="bk-chip">{stats.upcoming} upcoming</span>
-        <span class="bk-chip">{stats.attended} attended</span>
-        <span class="bk-chip">{stats.cancelled} cancelled</span>
-        {stats.noShow > 0 && <span class="bk-chip">{stats.noShow} no-show</span>}
+      <div class="bk-head">
+        <div class="bk-stats">
+          <span class="bk-chip">{stats.upcoming} upcoming</span>
+          <span class="bk-chip">{stats.attended} attended</span>
+          <span class="bk-chip">{stats.cancelled} cancelled</span>
+          {stats.noShow > 0 && <span class="bk-chip">{stats.noShow} no-show</span>}
+        </div>
+        {upcoming.length > 1 && (
+          <button class="bk-tool bk-all" type="button" data-ics-all>📅 Add all upcoming to calendar</button>
+        )}
       </div>
     )}
   </section>
@@ -108,6 +136,7 @@ function countdown(iso) {
         {upcoming.map((b, i) => {
           const look = classLook(b.resource_name);
           const d = badgeOf(b.start_time);
+          const when = `${dayLongFmt.format(new Date(b.start_time))} · ${formatTime(b.start_time)} – ${formatTime(b.end_time)}`;
           return (
             <li class="booking bk" style={`--hue:${look.hue};--i:${i}`}>
               <div class="bk-badge"><small>{d.month}</small><b>{d.day}</b><span>{d.weekday}</span></div>
@@ -117,6 +146,34 @@ function countdown(iso) {
                   {formatTime(b.start_time)} – {formatTime(b.end_time)} · {minutesBetween(b.start_time, b.end_time)} min · {b.guests} {b.guests === 1 ? 'guest' : 'guests'}
                 </span>
                 {countdown(b.start_time) && <span class="bk-when">{countdown(b.start_time)}</span>}
+                <div class="bk-tools">
+                  <button
+                    class="bk-tool"
+                    type="button"
+                    data-ics
+                    data-id={b.id}
+                    data-name={b.resource_name}
+                    data-start={b.start_time}
+                    data-end={b.end_time}
+                    data-guests={b.guests}
+                  >📅 Add to calendar</button>
+                  {qr[b.id] && (
+                    <>
+                      <button
+                        class="bk-tool"
+                        type="button"
+                        data-ticket
+                        data-id={b.id}
+                        data-icon={look.icon}
+                        data-name={b.resource_name}
+                        data-when={when}
+                        data-guests={b.guests}
+                        data-code={ticketCode(b.id)}
+                      >🎟️ Show ticket</button>
+                      <div hidden data-qr-for={b.id} set:html={qr[b.id]}></div>
+                    </>
+                  )}
+                </div>
               </div>
               <div class="actions">
                 <span class="badge badge-confirmed">Confirmed</span>
@@ -155,6 +212,28 @@ function countdown(iso) {
       </ul>
     </section>
   )}
+
+  {upcoming.length > 0 && (
+    <dialog id="ticket-dialog" aria-labelledby="tk-title">
+      <div class="dialog-body tk">
+        <p class="tk-kicker">YOUR TICKET</p>
+        <div class="tk-head">
+          <span class="tk-icon" id="tk-icon" aria-hidden="true"></span>
+          <div>
+            <h2 id="tk-title"></h2>
+            <p class="muted" id="tk-when"></p>
+          </div>
+        </div>
+        <div class="tk-qr" id="tk-qr" role="img" aria-label="Ticket QR code"></div>
+        <p class="tk-code">Ticket <b id="tk-code"></b></p>
+        <p class="tk-note muted" id="tk-meta"></p>
+        <p class="tk-note muted">Show this at the front desk when you arrive.</p>
+        <div class="dialog-actions">
+          <button type="button" class="btn btn-ghost" id="tk-close">Close</button>
+        </div>
+      </div>
+    </dialog>
+  )}
 </Layout>
 
 <!-- Cancel script: unchanged from your working version -->
@@ -184,8 +263,120 @@ function countdown(iso) {
   });
 </script>
 
+<!-- Add to calendar: builds an .ics file in the browser (one booking, or all upcoming) -->
+<script is:inline>
+  (function () {
+    var holder = document.querySelector('[data-studio]');
+    var studio = (holder && holder.dataset.studio) || 'Studio';
+
+    function stamp(iso) {
+      return new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    }
+    function esc(value) {
+      return String(value).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+    }
+    function fromButton(button) {
+      return {
+        id: button.dataset.id,
+        name: button.dataset.name,
+        start: button.dataset.start,
+        end: button.dataset.end,
+        guests: Number(button.dataset.guests) || 1,
+      };
+    }
+    function eventLines(b) {
+      return [
+        'BEGIN:VEVENT',
+        'UID:' + b.id + '@tarunam-studios', // a fixed id, so adding it twice updates the event
+        'DTSTAMP:' + stamp(new Date().toISOString()),
+        'DTSTART:' + stamp(b.start),
+        'DTEND:' + stamp(b.end),
+        'SUMMARY:' + esc(b.name + ' at ' + studio),
+        'DESCRIPTION:' + esc('Booked for ' + b.guests + (b.guests === 1 ? ' guest' : ' guests') + ' via Tarunam Studios.'),
+        'LOCATION:' + esc(studio),
+        'STATUS:CONFIRMED',
+        'BEGIN:VALARM',
+        'ACTION:DISPLAY',
+        'DESCRIPTION:' + esc(b.name + ' starts in 1 hour'),
+        'TRIGGER:-PT1H',
+        'END:VALARM',
+        'END:VEVENT',
+      ];
+    }
+    function download(events, filename) {
+      var lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Tarunam Studios//Booking//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH'];
+      events.forEach(function (event) { lines = lines.concat(eventLines(event)); });
+      lines.push('END:VCALENDAR');
+      var blob = new Blob([lines.join('\r\n')], { type: 'text/calendar;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      if (window.toast) window.toast('Calendar file downloaded', 'ok');
+    }
+    function slug(text) {
+      return String(text).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'booking';
+    }
+
+    document.addEventListener('click', function (e) {
+      var one = e.target.closest('[data-ics]');
+      if (one) {
+        download([fromButton(one)], slug(one.dataset.name) + '.ics');
+        return;
+      }
+      var all = e.target.closest('[data-ics-all]');
+      if (all) {
+        var events = Array.prototype.map.call(document.querySelectorAll('[data-ics]'), fromButton);
+        if (events.length) download(events, slug(studio) + '-bookings.ics');
+      }
+    });
+  })();
+</script>
+
+<!-- Ticket pop-up: copies the server-made QR code into a dialog -->
+<script is:inline>
+  (function () {
+    var dialog = document.getElementById('ticket-dialog');
+    if (!dialog) return;
+    function $(id) { return document.getElementById(id); }
+    var holder = document.querySelector('[data-studio]');
+    var studio = (holder && holder.dataset.studio) || '';
+
+    document.addEventListener('click', function (e) {
+      var button = e.target.closest('[data-ticket]');
+      if (!button) return;
+      var source = document.querySelector('[data-qr-for="' + CSS.escape(button.dataset.id) + '"]');
+      if (!source) return;
+
+      // Every value goes in through textContent, so nothing can inject HTML
+      $('tk-icon').textContent = button.dataset.icon;
+      $('tk-title').textContent = button.dataset.name;
+      $('tk-when').textContent = button.dataset.when;
+      $('tk-code').textContent = button.dataset.code;
+      var guests = Number(button.dataset.guests) || 1;
+      $('tk-meta').textContent = guests + (guests === 1 ? ' guest' : ' guests') + (studio ? ' · ' + studio : '');
+
+      var target = $('tk-qr');
+      target.replaceChildren();
+      Array.prototype.forEach.call(source.childNodes, function (node) {
+        target.appendChild(node.cloneNode(true));
+      });
+      dialog.showModal();
+    });
+
+    $('tk-close').addEventListener('click', function () { dialog.close(); });
+    dialog.addEventListener('click', function (e) { if (e.target === dialog) dialog.close(); }); // click on the backdrop
+  })();
+</script>
+
 <style is:global>
+  .bk-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1rem; margin-top: 0.9rem; }
   .bk-stats { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.9rem; }
+  .bk-head .bk-stats { margin-top: 0; }
   .bk-chip { display: inline-block; font-size: 0.8rem; font-weight: 700; padding: 0.2rem 0.75rem; border-radius: 999px; background: var(--brand-soft, #eef2ff); color: var(--brand-dark, #4338ca); }
   .bk-count { display: inline-block; font-size: 0.78rem; font-weight: 700; padding: 0.05rem 0.6rem; border-radius: 999px; background: var(--brand-soft, #eef2ff); color: var(--brand-dark, #4338ca); vertical-align: middle; margin-left: 0.3rem; }
 
@@ -214,8 +405,29 @@ function countdown(iso) {
   .bk-meta { color: var(--muted, #64748b); font-size: 0.88rem; font-variant-numeric: tabular-nums; }
   .bk-when { align-self: flex-start; font-size: 0.75rem; font-weight: 700; padding: 0.12rem 0.65rem; border-radius: 999px; background: #dcfce7; color: #166534; margin-top: 0.1rem; }
 
+  /* Calendar + ticket buttons */
+  .bk-tools { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.4rem; }
+  .bk-tool { border: 1px solid var(--line, #e2e8f0); background: #fff; color: var(--ink, #111827); border-radius: 999px; padding: 0.3rem 0.8rem; font: inherit; font-size: 0.8rem; font-weight: 650; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.15s; }
+  .bk-tool:hover { background: var(--brand-soft, #eef2ff); color: var(--brand-dark, #4338ca); border-color: var(--brand, #4f46e5); transform: translateY(-1px); }
+  .bk-tool:focus-visible { outline: 3px solid color-mix(in srgb, var(--brand, #4f46e5) 45%, transparent); outline-offset: 2px; }
+  .bk-all { font-size: 0.82rem; padding: 0.4rem 0.95rem; }
+
+  /* Ticket dialog */
+  .tk { justify-items: center; text-align: center; }
+  .tk-kicker { margin: 0; color: var(--brand-dark, #4338ca); font-size: 0.72rem; font-weight: 800; letter-spacing: 0.12em; }
+  .tk-head { display: flex; align-items: center; gap: 0.9rem; text-align: left; justify-self: stretch; }
+  .tk-icon { width: 52px; height: 52px; border-radius: 15px; background: var(--brand-soft, #eef2ff); display: grid; place-items: center; font-size: 1.7rem; flex: none; }
+  .tk-head h2 { margin: 0; font-size: 1.25rem; }
+  .tk-head p { margin: 0.1rem 0 0; font-size: 0.88rem; }
+  .tk-qr { width: min(240px, 70vw); padding: 0.7rem; background: #fff; border: 1px solid var(--line, #e2e8f0); border-radius: 18px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08); line-height: 0; }
+  .tk-qr svg { display: block; width: 100%; height: auto; }
+  .tk-code { margin: 0; color: var(--muted, #64748b); font-size: 0.9rem; }
+  .tk-code b { color: var(--ink, #111827); font-size: 1.15rem; letter-spacing: 0.12em; font-variant-numeric: tabular-nums; }
+  .tk-note { margin: 0; font-size: 0.82rem; }
+  .tk .dialog-actions { justify-self: stretch; }
+
   @keyframes bk-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-  @media (prefers-reduced-motion: reduce) { .booking.bk { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .booking.bk { animation: none; } .bk-tool { transition: none; } }
   @media (max-width: 640px) {
     .booking.bk { grid-template-columns: 70px 1fr; }
     .booking.bk .actions { grid-column: 1 / -1; }
